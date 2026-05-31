@@ -127,6 +127,29 @@ namespace LobbyKit
                 MelonLogger.Warning($"[HeadlessMode] Application.Quit() called.\n{new System.Diagnostics.StackTrace(true)}");
         }
 
+        private static bool _muteLogged;
+        private static bool _muteErrLogged;
+
+        // Headless audio kill. -nographics does NOT disable audio, and the game re-applies its saved
+        // MasterVolume / un-pauses when the main scene loads. MelonLoader calls OnUpdate every frame
+        // natively (more reliable here than a MelonCoroutine), so re-assert the global Unity audio
+        // mute each frame. Surface the first exception instead of swallowing it, so we can see if the
+        // AudioListener static access itself is failing.
+        public override void OnUpdate()
+        {
+            if (!Application.isBatchMode) return;
+            try
+            {
+                if (AudioListener.volume != 0f) AudioListener.volume = 0f;
+                if (!AudioListener.pause) AudioListener.pause = true;
+                if (!_muteLogged) { MelonLogger.Msg("[HeadlessMode] Audio muted via OnUpdate (AudioListener.volume=0)."); _muteLogged = true; }
+            }
+            catch (Exception ex)
+            {
+                if (!_muteErrLogged) { MelonLogger.Warning($"[HeadlessMode] OnUpdate mute FAILED: {ex.GetType().Name}: {ex.Message}"); _muteErrLogged = true; }
+            }
+        }
+
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
         {
             ReferencesLoaded = false;
