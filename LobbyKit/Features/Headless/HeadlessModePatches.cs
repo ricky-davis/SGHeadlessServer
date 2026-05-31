@@ -6,7 +6,6 @@ using Il2Cpp;
 using Il2CppFishNet;
 using Il2CppPlayEveryWare.EpicOnlineServices;
 using Il2CppPlayEveryWare.EpicOnlineServices.Samples;
-using Il2CppTMPro;
 using Il2Cpp_Scripts.Managers;
 using MelonLoader;
 using UnityEngine;
@@ -18,7 +17,7 @@ namespace LobbyKit.Features.Headless
     {
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
-            MelonLogger.Msg("[HeadlessMode] Applying headless suppression patches...");
+            MelonLogger.Msg("[HeadlessMode] v8 Applying headless suppression patches...");
 
             TryPatch(harmony,
                 typeNames: new[] { "Il2CppRewired.InputManager_Base", "Il2CppRewired.InputManager" },
@@ -78,12 +77,7 @@ namespace LobbyKit.Features.Headless
             // The EOSAuthenticator boot coroutine checks SteamManager.Initialized before
             // proceeding. Fake it as true so the coroutine doesn't hang waiting for Steam.
             PatchSteamManagerInitialized(harmony);
-
-            // SteamManager.StartConnectLoginWithSteamSessionTicket (public, 1 param) is what
-            // EOSAuthenticator calls to obtain a Steam session ticket and log into EOS Connect.
-            // There are two overloads (public 1-param, private 2-param), so we must specify
-            // the exact signature to avoid AmbiguousMatchException.
-            PatchSteamConnectMethod(harmony);
+            // Steam auth proceeds naturally — no interception needed when Steam is open.
 
             MelonCoroutines.Start(WaitForEosLoginAndAutoHost());
             MelonLogger.Msg("[HeadlessMode] Done.");
@@ -143,133 +137,19 @@ namespace LobbyKit.Features.Headless
             var callbackType = AccessTools.TypeByName("Il2CppPlayEveryWare.EpicOnlineServices.EOSManager+OnConnectLoginCallback");
             if (callbackType == null) { MelonLogger.Warning("[HeadlessMode] OnConnectLoginCallback type not found."); return; }
 
-            // Select the public 1-param overload explicitly to avoid AmbiguousMatchException
-            System.Reflection.MethodInfo method = null;
-            try { method = AccessTools.Method(steamType, "StartConnectLoginWithSteamSessionTicket", new[] { callbackType }); }
-            catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] Steam connect method lookup: {ex.GetType().Name}: {ex.Message}"); }
-
-            if (method == null) { MelonLogger.Warning("[HeadlessMode] SteamManager.StartConnectLoginWithSteamSessionTicket(callback) not found."); return; }
-
-            try
-            {
-                harmony.Patch(method, prefix: new HarmonyMethod(typeof(HeadlessModePatches), nameof(SteamManager_StartConnectWithSteam_Prefix)));
-                MelonLogger.Msg("[HeadlessMode] Patched 'SteamManager.StartConnectLoginWithSteamSessionTicket → DeviceAuth'.");
-            }
-            catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] Steam connect patch failed: {ex.Message}"); }
-        }
-
-        // ── Device Auth — reuse game's ConnectLoginTokenCallback ──────────────────────
-
-        // SteamManager.StartConnectLoginWithSteamSessionTicket(OnConnectLoginCallback callback)
-        // is called by EOSAuthenticator (possibly multiple times via retry). We intercept the
-        // FIRST call only, skip Steam, and pass the same callback to StartConnectLoginWithDeviceToken.
-        private static volatile bool _deviceAuthStarted = false;
-
-        private static bool SteamManager_StartConnectWithSteam_Prefix(object[] __args)
-        {
-            if (!Application.isBatchMode) return true;
-            if (_deviceAuthStarted)
-            {
-                MelonLogger.Msg("[HeadlessMode] Device auth already in progress — suppressing retry.");
-                return false;
-            }
-            _deviceAuthStarted = true;
-
-            var callback = __args?[0] as EOSManager.OnConnectLoginCallback;
-            MelonLogger.Msg($"[HeadlessMode] Steam connect intercepted → Device Auth. Callback: {(callback == null ? "NULL" : "captured")}");
-            MelonCoroutines.Start(DeviceAuthCoroutine(callback));
-            return false;
-        }
-
-        private static IEnumerator DeviceAuthCoroutine(EOSManager.OnConnectLoginCallback callback)
-        {
-            float waited = 0f;
-            while (waited < 30f)
-            {
-                try { if (EOSManager.Instance != null) break; } catch { }
-                yield return new WaitForSecondsRealtime(0.5f);
-                waited += 0.5f;
-            }
-
-            if (EOSManager.Instance == null)
-            {
-                MelonLogger.Warning("[HeadlessMode] EOSManager null — device auth aborted.");
-                yield break;
-            }
-
-            MelonLogger.Msg("[HeadlessMode] Calling StartConnectLoginWithDeviceToken...");
-            try
-            {
-                EOSManager.Instance.StartConnectLoginWithDeviceToken("HeadlessServer", callback);
-                MelonLogger.Msg("[HeadlessMode] StartConnectLoginWithDeviceToken returned (async).");
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Warning($"[HeadlessMode] StartConnectLoginWithDeviceToken threw: {ex.GetType().Name}: {ex.Message}");
-                yield break;
-            }
-
-            // Poll to see if PEWS picked up the login via either check
-            for (int i = 0; i < 20; i++)
-            {
-                yield return new WaitForSecondsRealtime(1f);
-                bool hasLoggedIn = false;
-                string productUserId = "null";
-                try { hasLoggedIn = EOSManager.Instance?.HasLoggedInWithConnect() == true; } catch { }
-                try
-                {
-                    var puid = EOSManager.Instance?.GetProductUserId();
-                    productUserId = puid != null ? puid.ToString() : "null";
-                    // If GetProductUserId() returns a valid ID, consider auth done
-                    if (!hasLoggedIn && puid != null)
-                    {
-                        try { hasLoggedIn = puid.IsValid(); } catch { hasLoggedIn = true; }
-                    }
-                }
-                catch { }
-                MelonLogger.Msg($"[HeadlessMode] Poll {i + 1}/20: HasLoggedInWithConnect={hasLoggedIn}, ProductUserId={productUserId}");
-                if (hasLoggedIn) break;
-            }
+            // No further patching — Steam auth proceeds naturally.
         }
 
         // ── LobbyManager.CreateLobby null-field patches ───────────────────────────────
-
-        private static bool _lobbyManagerDumped;
 
         private static void LobbyManager_CreateLobby_PreInit(LobbyManager __instance)
         {
             if (!Application.isBatchMode) return;
 
-            if (!_lobbyManagerDumped)
-            {
-                _lobbyManagerDumped = true;
-                foreach (var prop in typeof(LobbyManager).GetProperties(
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
-                {
-                    try
-                    {
-                        if (!prop.CanRead) continue;
-                        var val = prop.GetValue(__instance);
-                        bool isNull = val == null || val is Object o && o == null;
-                        var pt = prop.PropertyType;
-                        bool isTMP = typeof(TMP_Text).IsAssignableFrom(pt) || typeof(TMP_InputField).IsAssignableFrom(pt);
-                        if (isTMP) MelonLogger.Msg($"[HeadlessMode] LobbyManager.{prop.Name} ({pt.Name}) = {(isNull ? "NULL" : "set")}");
-                    }
-                    catch { }
-                }
-            }
-
-            EnsureField<TextMeshProUGUI>(__instance, "lobbyNameText");
-            EnsureField<TextMeshProUGUI>(__instance, "lobbyMaxPlayersText");
-            EnsureField<TextMeshProUGUI>(__instance, "lobbyCodeText");
-            EnsureField<TextMeshProUGUI>(__instance, "lobbyPasswordText");
-            EnsureField<TextMeshProUGUI>(__instance, "lobbyNameTextLocalizationKey");
-            EnsureField<TMP_InputField>(__instance, "_lobbyNameInputField");
-            EnsureField<TMP_InputField>(__instance, "passwordInputField");
-            EnsureField<TMP_InputField>(__instance, "passwordCheckInputField");
+            EnsureUnityEvent(__instance, "LobbyJoiningEvent");
         }
 
-        private static void EnsureField<T>(LobbyManager instance, string propName) where T : Component
+        private static void EnsureUnityEvent(LobbyManager instance, string propName)
         {
             try
             {
@@ -277,18 +157,11 @@ namespace LobbyKit.Features.Headless
                     BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
                 if (prop == null || !prop.CanRead || !prop.CanWrite) return;
                 var val = prop.GetValue(instance);
-                bool isNull = val == null || val is Object o && o == null;
-                if (!isNull) return;
-
-                var go = new GameObject($"HeadlessDummy_{propName}");
-                Object.DontDestroyOnLoad(go);
-                T comp;
-                try { comp = go.AddComponent<T>(); }
-                catch { Object.Destroy(go); return; }
-                if (comp != null) { prop.SetValue(instance, comp); MelonLogger.Msg($"[HeadlessMode] Pre-initialized LobbyManager.{propName}"); }
-                else Object.Destroy(go);
+                if (val != null && !(val is Object o && o == null)) return;
+                prop.SetValue(instance, new UnityEngine.Events.UnityEvent());
+                MelonLogger.Msg($"[HeadlessMode] Pre-initialized LobbyManager.{propName}");
             }
-            catch { }
+            catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] EnsureUnityEvent {propName}: {ex.Message}"); }
         }
 
         private static Exception LobbyManager_CreateLobby_Finalizer(Exception __exception)
@@ -309,23 +182,22 @@ namespace LobbyKit.Features.Headless
 
             MelonCoroutines.Start(SilenceAudio());
 
-            MelonLogger.Msg("[HeadlessMode] Waiting for EOS Connect login...");
+            MelonLogger.Msg("[HeadlessMode] Waiting for EOS Connect login (Steam)...");
             float elapsed = 0f;
             while (elapsed < 120f)
             {
-                yield return new WaitForSecondsRealtime(0.1f);
-                elapsed += 0.1f;
+                yield return new WaitForSecondsRealtime(0.5f);
+                elapsed += 0.5f;
                 try
                 {
                     if (EOSManager.Instance?.HasLoggedInWithConnect() == true) break;
-                    // Device auth sets ProductUserId without setting HasLoggedInWithConnect
                     var puid = EOSManager.Instance?.GetProductUserId();
                     if (puid != null && puid.IsValid()) break;
                 }
                 catch { }
             }
 
-            if (elapsed >= 120f) { MelonLogger.Warning("[HeadlessMode] EOS login timed out."); yield break; }
+            if (elapsed >= 120f) { MelonLogger.Warning("[HeadlessMode] EOS login timed out — is Steam running?"); yield break; }
             MelonLogger.Msg("[HeadlessMode] EOS Connect login confirmed.");
 
             elapsed = 0f;
