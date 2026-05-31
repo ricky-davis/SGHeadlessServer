@@ -21,6 +21,7 @@ namespace LobbyKit.Patches
         [HarmonyPrefix]
         private static void LobbyManager_CreateLobby_Prefix(ref string lobbyName, ref int maxPlayers)
         {
+            if (UnityEngine.Application.isBatchMode) return;
             LobbyUiController.Instance.ApplyLobbyManagerCreateLobby(ref lobbyName, ref maxPlayers);
         }
 
@@ -28,6 +29,7 @@ namespace LobbyKit.Patches
         [HarmonyPrefix]
         private static void EOSLobbyManager_CreateLobby_Prefix(EOSLobbyManager __instance, EosLobby lobbyProperties)
         {
+            if (UnityEngine.Application.isBatchMode) return;
             LobbyUiController.Instance.ApplyEosCreateLobby(lobbyProperties);
         }
 

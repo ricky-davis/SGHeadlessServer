@@ -32,6 +32,7 @@ UserData/
 Mods/
 Plugins/
 GameSource
+GameData
 
 # Github Actions local testing
 act-event.json

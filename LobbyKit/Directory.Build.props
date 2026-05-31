@@ -1,11 +1,14 @@
 <Project>
   <PropertyGroup>
+    <!-- GameData (local copy) takes priority over the Steam installation -->
+    <LocalGamePath>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../GameData'))</LocalGamePath>
     <WindowsGamePath>C:\Program Files (x86)\Steam\steamapps\common\Sledding Game</WindowsGamePath>
-    <LinuxGamePath>/mnt/c/Program Files (x86)/Steam/steamapps/common/Sledding Game</LinuxGamePath>
+    <LinuxGamePath>/mnt/c/Program Files (x86)/Steam/steamapps\common\Sledding Game</LinuxGamePath>
 
+    <GamePath Condition="'$(GamePath)' == '' and Exists('$(LocalGamePath)')">$(LocalGamePath)</GamePath>
     <GamePath Condition="'$(GamePath)' == '' and Exists('$(WindowsGamePath)')">$(WindowsGamePath)</GamePath>
     <GamePath Condition="'$(GamePath)' == '' and Exists('$(LinuxGamePath)')">$(LinuxGamePath)</GamePath>
-    <GamePath Condition="'$(GamePath)' == ''">$(WindowsGamePath)</GamePath>
+    <GamePath Condition="'$(GamePath)' == ''">$(LocalGamePath)</GamePath>
     <RefRoot Condition="'$(RefRoot)' == '' and Exists('$(GamePath)/MelonLoader')">$(GamePath)/MelonLoader</RefRoot>
     <RefRoot Condition="'$(RefRoot)' == ''">$(GamePath)/MelonLoader</RefRoot>
 
