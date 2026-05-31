@@ -1,0 +1,83 @@
+name: Thunderstore Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      dryrun:
+        description: "Echo commands instead of executing them"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    env:
+      DRYRUN: ${{ inputs.dryrun || 'false' }}
+      REFROOT_PATH: ${{ github.workspace }}/sg-refroot
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout SGRefRoot
+        uses: actions/checkout@v4
+        with:
+          repository: ricky-davis/SGRefRoot
+          path: sg-refroot
+          token: ${{ secrets.SGREFROOT_TOKEN }}
+          fetch-depth: 1
+
+      - name: Validate SGRefRoot layout
+        run: |
+          test -d "$REFROOT_PATH/Il2CppAssemblies"
+          test -d "$REFROOT_PATH/net6"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 6.0.x
+
+      - name: Restore
+        run: |
+          dotnet restore LobbyKit/LobbyKit.csproj -p:RefRoot="$REFROOT_PATH"
+
+      - name: Build
+        run: |
+          dotnet build LobbyKit/LobbyKit.csproj -c Release --no-restore -p:DeployMod=false -p:RefRoot="$REFROOT_PATH"
+
+      - name: Install Thunderstore CLI
+        run: |
+          dotnet tool install --global tcli
+
+      - name: Add global dotnet tools to PATH
+        run: echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Resolve package version
+        id: version
+        run: |
+          VERSION="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' LobbyKit/Directory.Build.props)"
+          if [ -z "$VERSION" ]; then
+            echo "Failed to resolve version from LobbyKit/Directory.Build.props" >&2
+            exit 1
+          fi
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build Thunderstore package
+        run: |
+          tcli build --config-path thunderstore.toml --package-version "${{ steps.version.outputs.value }}"
+
+      - name: Upload package artifact
+        if: ${{ !(inputs.dryrun == true || inputs.dryrun == 'true') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: thunderstore-package-${{ steps.version.outputs.value }}
+          path: build/*.zip
+          if-no-files-found: error

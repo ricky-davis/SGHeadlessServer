@@ -1,0 +1,675 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net6.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>disable</Nullable>
+		<RootNamespace>LobbyKit</RootNamespace>
+		<LangVersion>default</LangVersion>
+		<IsPackable>false</IsPackable>
+		<AssemblyVersion>1.0.0.0</AssemblyVersion>
+		<FileVersion>$(Version)</FileVersion>
+		<NeutralLanguage>en-US</NeutralLanguage>
+		<AssemblyName>LobbyKit</AssemblyName>
+		<LangVersion>latest</LangVersion>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<Reference Include="Assembly-CSharp-firstpass">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Assembly-CSharp-firstpass.dll</HintPath>
+		</Reference>
+		<Reference Include="Assembly-CSharp">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Assembly-CSharp.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppACTk.DOTS.Examples.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppACTk.DOTS.Examples.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppACTk.Examples.Genuine.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppACTk.Examples.Genuine.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppACTk.Examples.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppACTk.Examples.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppACTk.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppACTk.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppBinarySpiders">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppBinarySpiders.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppBoxophobic.Utils.Scripts">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppBoxophobic.Utils.Scripts.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcargo32.Port.API">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcargo32.Port.API.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcargo32.Port.Core">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcargo32.Port.Core.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcargo32.Port.Data">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcargo32.Port.Data.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcargo32.Port.Steam">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcargo32.Port.Steam.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcom.Epic.OnlineServices">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcom.Epic.OnlineServices.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcom.lightbug.character-controller-pro">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcom.lightbug.character-controller-pro.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcom.playeveryware.eos.core">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcom.playeveryware.eos.core.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcom.playeveryware.eos.samples.appleauth">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcom.playeveryware.eos.samples.appleauth.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcom.playeveryware.eos.samples">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcom.playeveryware.eos.samples.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcom.playeveryware.eos.samples.oculus">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcom.playeveryware.eos.samples.oculus.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcom.playeveryware.eos.samples.steam">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcom.playeveryware.eos.samples.steam.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppcom.rlabrecque.steamworks.net">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppcom.rlabrecque.steamworks.net.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppDissonanceVoip">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppDissonanceVoip.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppDissonanceVoip.FishNet">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppDissonanceVoip.FishNet.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppFImpossible">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppFImpossible.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppFishNet.CodeAnalysis">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppFishNet.CodeAnalysis.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppFishNet.Demos">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppFishNet.Demos.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppFishnet.Plugins.FishyEOS">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppFishnet.Plugins.FishyEOS.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppFishNet.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppFishNet.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppGameKit.Dependencies">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppGameKit.Dependencies.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppio.sentry.unity.runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppio.sentry.unity.runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppLeanTween">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppLeanTween.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppMono.Security">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppMono.Security.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppmscorlib">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppmscorlib.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppNaughtyAttributes.Core">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppNaughtyAttributes.Core.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppNewtonsoft.Json">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppNewtonsoft.Json.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppOutlineFx">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppOutlineFx.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppRewired">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppRewired.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppRewired_Core">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppRewired_Core.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppRewired_Windows">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppRewired_Windows.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppsc.posteffects.runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppsc.posteffects.runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.Microsoft.Bcl.AsyncInterfaces">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.System.Buffers">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.System.Buffers.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.System.Collections.Immutable">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.System.Collections.Immutable.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.System.Memory">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.System.Memory.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.System.Numerics.Vectors">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.System.Numerics.Vectors.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.System.Reflection.Metadata">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.System.Reflection.Metadata.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.System.Runtime.CompilerServices.Unsafe">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.System.Runtime.CompilerServices.Unsafe.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.System.Text.Encodings.Web">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.System.Text.Encodings.Web.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.System.Text.Json">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.System.Text.Json.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.System.Threading.Tasks.Extensions">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.System.Threading.Tasks.Extensions.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.Unity">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.Unity.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSentry.Unity.Native">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSentry.Unity.Native.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppShapesRuntime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppShapesRuntime.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppShapesSamples">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppShapesSamples.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem.Configuration">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.Configuration.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem.Core">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.Core.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem.Data">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.Data.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem.Drawing">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.Drawing.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem.Globalization">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.Globalization.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem.Net.Http">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.Net.Http.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem.Numerics">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.Numerics.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem.Runtime.Serialization">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.Runtime.Serialization.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem.Xml">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.Xml.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppSystem.Xml.Linq">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppSystem.Xml.Linq.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppUltimateChatBox">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppUltimateChatBox.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppUniTask">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2CppUniTask.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cppunity-websocket-sharp">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cppunity-websocket-sharp.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2Cpp__Generated">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Il2Cpp__Generated.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Addressables">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Addressables.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Animation.Rigging">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Animation.Rigging.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Burst">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Burst.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Burst.Unsafe">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Burst.Unsafe.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Cinemachine">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Cinemachine.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Collections">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Collections.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Collections.LowLevel.ILSupport">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Collections.LowLevel.ILSupport.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.InputSystem">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.InputSystem.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.InputSystem.ForUI">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.InputSystem.ForUI.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.InternalAPIEngineBridge.004">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.InternalAPIEngineBridge.004.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Localization">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Localization.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Mathematics">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Mathematics.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.MemoryProfiler">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.MemoryProfiler.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Microsoft.GDK">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Microsoft.GDK.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Microsoft.GDK.Tools">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Microsoft.GDK.Tools.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Networking.Transport">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Networking.Transport.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Postprocessing.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Postprocessing.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.RenderPipeline.Universal.ShaderLibrary">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.RenderPipeline.Universal.ShaderLibrary.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.RenderPipelines.Core.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.RenderPipelines.Core.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.RenderPipelines.Core.Runtime.Shared">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.RenderPipelines.Core.Runtime.Shared.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.RenderPipelines.GPUDriven.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.RenderPipelines.GPUDriven.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.RenderPipelines.Universal.2D.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.RenderPipelines.Universal.2D.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.RenderPipelines.Universal.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.RenderPipelines.Universal.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.ResourceManager">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.ResourceManager.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Authentication">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Authentication.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Authentication.PlayerAccounts">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Authentication.PlayerAccounts.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core.Components">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.Components.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core.Configuration">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.Configuration.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core.Device">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.Device.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core.Environments">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.Environments.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core.Environments.Internal">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.Environments.Internal.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core.Internal">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.Internal.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core.Registration">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.Registration.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core.Scheduler">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.Scheduler.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core.Telemetry">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.Telemetry.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Core.Threading">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Core.Threading.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Multiplayer">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Multiplayer.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.QoS">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.QoS.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Services.Wire.Internal">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Services.Wire.Internal.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Splines">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Splines.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.TextMeshPro">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.TextMeshPro.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.Timeline">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.Timeline.dll</HintPath>
+		</Reference>
+		<Reference Include="Unity.UnifiedRayTracing.Runtime">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\Unity.UnifiedRayTracing.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.AccessibilityModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.AccessibilityModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.AdaptivePerformanceModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.AdaptivePerformanceModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.AIModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.AIModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.AndroidJNIModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.AndroidJNIModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.AnimationModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.AnimationModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.ARModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.ARModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.AssetBundleModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.AssetBundleModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.AudioModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.AudioModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.ClothModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.ClothModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.ContentLoadModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.ContentLoadModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.CoreModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.CoreModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.CrashReportingModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.CrashReportingModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.DirectorModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.DirectorModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.DSPGraphModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.DSPGraphModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.GameCenterModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.GameCenterModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.GIModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.GIModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.GraphicsStateCollectionSerializerModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.GraphicsStateCollectionSerializerModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.GridModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.GridModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.HierarchyCoreModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.HierarchyCoreModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.HierarchyModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.HierarchyModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.HotReloadModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.HotReloadModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.IdentifiersModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.IdentifiersModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.ImageConversionModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.ImageConversionModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.IMGUIModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.IMGUIModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.InputForUIModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.InputForUIModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.InputLegacyModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.InputLegacyModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.InputModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.InputModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.InsightsModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.InsightsModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.JSONSerializeModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.JSONSerializeModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.LocalizationModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.LocalizationModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.MarshallingModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.MarshallingModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.MultiplayerModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.MultiplayerModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.ParticleSystemModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.ParticleSystemModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.PerformanceReportingModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.PerformanceReportingModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.Physics2DModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.Physics2DModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.PhysicsBackendPhysXModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.PhysicsBackendPhysXModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.PhysicsModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.PhysicsModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.PropertiesModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.PropertiesModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.RenderAs2DModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.RenderAs2DModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.RuntimeInitializeOnLoadManagerInitializerModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.RuntimeInitializeOnLoadManagerInitializerModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.ScreenCaptureModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.ScreenCaptureModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.ShaderRuntimeModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.ShaderRuntimeModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.ShaderVariantAnalyticsModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.ShaderVariantAnalyticsModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.SharedInternalsModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.SharedInternalsModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.SpriteMaskModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.SpriteMaskModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.SpriteShapeModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.SpriteShapeModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.StreamingModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.StreamingModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.SubstanceModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.SubstanceModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.SubsystemsModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.SubsystemsModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.TerrainModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.TerrainModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.TerrainPhysicsModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.TerrainPhysicsModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.TextCoreFontEngineModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.TextCoreFontEngineModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.TextCoreTextEngineModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.TextCoreTextEngineModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.TextRenderingModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.TextRenderingModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.TilemapModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.TilemapModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.TLSModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.TLSModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UI">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UI.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UIElementsModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UIElementsModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UIModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UIModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UmbraModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UmbraModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UnityAnalyticsCommonModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UnityAnalyticsCommonModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UnityAnalyticsModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UnityAnalyticsModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UnityConnectModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UnityConnectModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UnityConsentModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UnityConsentModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UnityCurlModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UnityCurlModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UnityWebRequestAssetBundleModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UnityWebRequestAssetBundleModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UnityWebRequestAudioModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UnityWebRequestAudioModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UnityWebRequestModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UnityWebRequestModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UnityWebRequestTextureModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UnityWebRequestTextureModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.UnityWebRequestWWWModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.UnityWebRequestWWWModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.VectorGraphicsModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.VectorGraphicsModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.VehiclesModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.VehiclesModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.VFXModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.VFXModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.VideoModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.VideoModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.VRModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.VRModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.WindModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.WindModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.XRModule">
+			<HintPath>$(RefRoot)\Il2CppAssemblies\UnityEngine.XRModule.dll</HintPath>
+		</Reference>
+		<Reference Include="MelonLoader">
+			<HintPath>$(RefRoot)\net6\MelonLoader.dll</HintPath>
+		</Reference>
+		<Reference Include="0Harmony">
+			<HintPath>$(RefRoot)\net6\0Harmony.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppInterop.Runtime">
+			<HintPath>$(RefRoot)\net6\Il2CppInterop.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppInterop.Common">
+			<HintPath>$(RefRoot)\net6\Il2CppInterop.Common.dll</HintPath>
+		</Reference>
+
+	</ItemGroup>
+
+	<PropertyGroup>
+		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+		<EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+		<StartAction>Program</StartAction>
+		<StartProgram>C:\Windows\explorer.exe</StartProgram>
+		<StartArguments>steam://rungameid/3438850</StartArguments>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+		<!-- Release build optimizations -->
+		<Optimize>true</Optimize>
+		<DebugType>none</DebugType>
+		<DebugSymbols>false</DebugSymbols>
+		<DefineConstants>TRACE;RELEASE</DefineConstants>
+	</PropertyGroup>
+
+	<ItemGroup>
+	<Compile Include="LobbyKitCore.cs" />
+	<Compile Include="$(IntermediateOutputPath)GeneratedMelonInfo.cs" />
+    <Compile Include="UI/NativeUiBackend.cs" />
+    <Compile Include="UI/SleddingUiAdapter.cs" />
+    <Compile Include="UI/SleddingUiPaths.cs" />
+    <Compile Include="UI/UiElement.cs" />
+    <Compile Include="UI/NativeUiTemplateSet.cs" />
+    <Compile Include="UI/ScrollViewport.cs" />
+    <Compile Include="UI/GridTrackRow.cs" />
+    <Compile Include="UI/NativeUiTemplates.cs" />
+    <Compile Include="UI/UiStyles.cs" />
+    <Compile Include="UI/UiLayout.cs" />
+    <Compile Include="UI/NativeUiFactory.cs" />
+    <Compile Include="UI/NativeUiBuilder.cs" />
+    <Compile Include="Features/Settings/SettingsDraft.cs" />
+    <Compile Include="Features/Settings/SettingsSchema.cs" />
+    <Compile Include="Features/Settings/SettingsMenuHandle.cs" />
+    <Compile Include="Features/Settings/SettingsMenuController.cs" />
+    <Compile Include="Features/Settings/SettingsMenuView.cs" />
+    <Compile Include="Features/Settings/SettingsPatches.cs" />
+    <Compile Include="Features/Lobby/LobbyUiController.cs" />
+	<Compile Include="Features/Lobby/SearchLobbiesUiController.cs" />
+    <Compile Include="Features/Lobby/MainMenuAdapter.cs" />
+    <Compile Include="Features/Lobby/LobbyMenuAdapter.cs" />
+    <Compile Include="Features/Lobby/LobbyCreateSubmission.cs" />
+    <Compile Include="Features/Anticheat/GenericServerRpcRateLimitPatch.cs" />
+    <Compile Include="Features/Anticheat/KickAnnouncer.cs" />
+    <Compile Include="Features/Headless/HeadlessModePatches.cs" />
+    <Compile Include="Features/Lobby/CrashProtectionPatches.cs" />
+    <Compile Include="Features/Lobby/LobbyPatches.cs" />
+    <Compile Include="Features/Lobby/SilentCrashDetectionPatches.cs" />
+    <Compile Include="Features/Lobby/AutoRestartPatches.cs" />
+    <Compile Include="Features/PlayerList/PlayerListTimerController.cs" />
+    <Compile Include="Features/PlayerList/PlayerListPatches.cs" />
+    <Compile Include="ChatSystem.cs" />
+    <Compile Include="Utils.cs" />
+		<Content Include="Directory.Build.props" />
+	</ItemGroup>
+	
+	<Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(DeployMod)' == 'true'">
+		<MakeDir Directories="$(GamePath)/Mods" />
+		<Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GamePath)/Mods" />
+	</Target>
+
+	<!-- Generate a small source file to keep MelonInfo assembly attribute in sync with MSBuild Version/Authors -->
+	<Target Name="GenerateMelonInfo" BeforeTargets="BeforeBuild">
+		<MakeDir Directories="$(IntermediateOutputPath)" />
+		<WriteLinesToFile File="$(IntermediateOutputPath)GeneratedMelonInfo.cs" Overwrite="true" Lines="using MelonLoader%3B&#xA;using LobbyKit%3B&#xA;[assembly: MelonInfo(typeof(LobbyKit.LobbyKitCore), &quot;LobbyKit&quot;, &quot;$(Version)&quot;, &quot;$(Authors)&quot;)]" />
+	</Target>
+</Project>

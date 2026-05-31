@@ -1,0 +1,108 @@
+name: GitHub Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.1.0). Must exist in CHANGELOG.md as ## [version] - YYYY-MM-DD"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as pre-release"
+        required: false
+        default: false
+        type: boolean
+      dryrun:
+        description: "Echo commands instead of executing them"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      DRYRUN: ${{ inputs.dryrun || 'false' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version format
+        run: |
+          VERSION="${{ inputs.version }}"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z-]+)?$'; then
+            echo "Invalid SemVer input: $VERSION" >&2
+            exit 1
+          fi
+
+      - name: Extract changelog notes
+        id: notes
+        run: |
+          VERSION="${{ inputs.version }}"
+          OUTFILE="release-notes.md"
+
+          awk -v v="$VERSION" '
+            BEGIN { in_section=0; found=0 }
+            {
+              sub(/\r$/, "", $0)
+            }
+            $0 ~ "^## \\[" v "\\]" {
+              in_section=1
+              found=1
+              print $0
+              next
+            }
+            in_section && $0 ~ "^## \\[" { exit }
+            in_section { print $0 }
+            END {
+              if (!found) {
+                print "Could not find changelog section for version " v > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' CHANGELOG.md > "$OUTFILE"
+          cat "$OUTFILE"
+
+          echo "path=$OUTFILE" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_WORKFLOW_TOKEN }}
+        run: |
+          VERSION="${{ inputs.version }}"
+          TAG="v$VERSION"
+
+          ARGS=()
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            ARGS+=(--prerelease)
+          fi
+
+          NOTES_FILE="${{ steps.notes.outputs.path }}"
+          CMD=(gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" "${ARGS[@]}")
+          VIEW_CMD=(gh release view "$TAG")
+
+          if [ "$DRYRUN" = "true" ]; then
+            echo "Dry run mode. Commands that would be executed:"
+            printf '%q ' "${VIEW_CMD[@]}"
+            echo
+            printf '%q ' "${CMD[@]}"
+            echo
+            echo "Release notes file: $NOTES_FILE"
+            command -v gh >/dev/null 2>&1 || echo "gh CLI not found in runner PATH"
+          else
+            if [ -z "${GH_TOKEN:-}" ]; then
+              echo "Missing required secret: RELEASE_WORKFLOW_TOKEN" >&2
+              exit 1
+            fi
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release $TAG already exists" >&2
+              exit 1
+            fi
+            "${CMD[@]}"
+          fi

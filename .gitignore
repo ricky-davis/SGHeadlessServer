@@ -1,0 +1,38 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# NuGet
+*.nupkg
+packages/
+!packages/build/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# MelonLoader runtime/output (if copied into repo for testing)
+MelonLoader/
+UserData/
+Mods/
+Plugins/
+GameSource
+
+# Github Actions local testing
+act-event.json
+act-commands.txt

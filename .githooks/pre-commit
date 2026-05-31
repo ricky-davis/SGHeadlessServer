@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+
+# Sanitize locale before invoking bash script to avoid invalid locale warnings.
+exec env -u LC_ALL -u LANGUAGE LANG=C "$REPO_ROOT/scripts/check-version-sync.sh"
