@@ -1,17 +1,14 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
 		<TargetFramework>net6.0</TargetFramework>
-		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>disable</Nullable>
-		<RootNamespace>LobbyKit</RootNamespace>
-		<LangVersion>default</LangVersion>
-		<IsPackable>false</IsPackable>
-		<AssemblyVersion>1.0.0.0</AssemblyVersion>
-		<FileVersion>$(Version)</FileVersion>
-		<NeutralLanguage>en-US</NeutralLanguage>
-		<AssemblyName>LobbyKit</AssemblyName>
 		<LangVersion>latest</LangVersion>
 		<ImplicitUsings>enable</ImplicitUsings>
+		<IsPackable>false</IsPackable>
+		<RootNamespace>SledHeadless</RootNamespace>
+		<AssemblyName>SledHeadless</AssemblyName>
+		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+		<EnableDefaultCompileItems>false</EnableDefaultCompileItems>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -622,54 +619,20 @@
 		<DefineConstants>TRACE;RELEASE</DefineConstants>
 	</PropertyGroup>
 
+
 	<ItemGroup>
-	<Compile Include="LobbyKitCore.cs" />
-	<Compile Include="$(IntermediateOutputPath)GeneratedMelonInfo.cs" />
-    <Compile Include="UI/NativeUiBackend.cs" />
-    <Compile Include="UI/SleddingUiAdapter.cs" />
-    <Compile Include="UI/SleddingUiPaths.cs" />
-    <Compile Include="UI/UiElement.cs" />
-    <Compile Include="UI/NativeUiTemplateSet.cs" />
-    <Compile Include="UI/ScrollViewport.cs" />
-    <Compile Include="UI/GridTrackRow.cs" />
-    <Compile Include="UI/NativeUiTemplates.cs" />
-    <Compile Include="UI/UiStyles.cs" />
-    <Compile Include="UI/UiLayout.cs" />
-    <Compile Include="UI/NativeUiFactory.cs" />
-    <Compile Include="UI/NativeUiBuilder.cs" />
-    <Compile Include="Features/Settings/SettingsDraft.cs" />
-    <Compile Include="Features/Settings/SettingsSchema.cs" />
-    <Compile Include="Features/Settings/SettingsMenuHandle.cs" />
-    <Compile Include="Features/Settings/SettingsMenuController.cs" />
-    <Compile Include="Features/Settings/SettingsMenuView.cs" />
-    <Compile Include="Features/Settings/SettingsPatches.cs" />
-    <Compile Include="Features/Lobby/LobbyUiController.cs" />
-	<Compile Include="Features/Lobby/SearchLobbiesUiController.cs" />
-    <Compile Include="Features/Lobby/MainMenuAdapter.cs" />
-    <Compile Include="Features/Lobby/LobbyMenuAdapter.cs" />
-    <Compile Include="Features/Lobby/LobbyCreateSubmission.cs" />
-    <Compile Include="Features/Anticheat/GenericServerRpcRateLimitPatch.cs" />
-    <Compile Include="Features/Anticheat/KickAnnouncer.cs" />
-    <Compile Include="Features/Headless/HeadlessModePatches.cs" />
-    <Compile Include="Features/Lobby/CrashProtectionPatches.cs" />
-    <Compile Include="Features/Lobby/LobbyPatches.cs" />
-    <Compile Include="Features/Lobby/SilentCrashDetectionPatches.cs" />
-    <Compile Include="Features/Lobby/AutoRestartPatches.cs" />
-    <Compile Include="Features/PlayerList/PlayerListTimerController.cs" />
-    <Compile Include="Features/PlayerList/PlayerListPatches.cs" />
-    <Compile Include="ChatSystem.cs" />
-    <Compile Include="Utils.cs" />
-		<Content Include="Directory.Build.props" />
+		<Compile Include="SledHeadlessCore.cs" />
+		<Compile Include="Features/Headless/HeadlessModePatches.cs" />
+		<Compile Include="$(IntermediateOutputPath)GeneratedMelonInfo.cs" />
 	</ItemGroup>
-	
+
 	<Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(DeployMod)' == 'true'">
 		<MakeDir Directories="$(GamePath)/Mods" />
 		<Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GamePath)/Mods" />
 	</Target>
 
-	<!-- Generate a small source file to keep MelonInfo assembly attribute in sync with MSBuild Version/Authors -->
 	<Target Name="GenerateMelonInfo" BeforeTargets="BeforeBuild">
 		<MakeDir Directories="$(IntermediateOutputPath)" />
-		<WriteLinesToFile File="$(IntermediateOutputPath)GeneratedMelonInfo.cs" Overwrite="true" Lines="using MelonLoader%3B&#xA;using LobbyKit%3B&#xA;[assembly: MelonInfo(typeof(LobbyKit.LobbyKitCore), &quot;LobbyKit&quot;, &quot;$(Version)&quot;, &quot;$(Authors)&quot;)]" />
+		<WriteLinesToFile File="$(IntermediateOutputPath)GeneratedMelonInfo.cs" Overwrite="true" Lines="using MelonLoader%3B&#xA;using SledHeadless%3B&#xA;[assembly: MelonInfo(typeof(SledHeadless.SledHeadlessCore), &quot;SledHeadless&quot;, &quot;$(Version)&quot;, &quot;$(Authors)&quot;)]" />
 	</Target>
 </Project>

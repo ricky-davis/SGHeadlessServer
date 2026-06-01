@@ -21,13 +21,13 @@ using MelonLoader.Utils;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
-namespace LobbyKit.Features.Headless
+namespace SledHeadless
 {
-    internal static class HeadlessModePatches
+    internal static class HeadlessPatches
     {
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
-            MelonLogger.Msg("[HeadlessMode] v42 Applying headless suppression patches...");
+            MelonLogger.Msg("[HeadlessMode] v43 Applying headless suppression patches...");
 
             TryPatch(harmony,
                 typeNames: new[] { "Il2CppRewired.InputManager_Base", "Il2CppRewired.InputManager" },
@@ -80,6 +80,23 @@ namespace LobbyKit.Features.Headless
                 prefix: nameof(LobbyManager_CreateLobby_PreInit),
                 finalizer: nameof(LobbyManager_CreateLobby_Finalizer),
                 label: "LobbyManager.CreateLobby null-field init");
+
+            // Any NetworkObject stop callback that throws aborts FishNet's despawn loop,
+            // leaving objects stuck and clients unable to finish loading. Suppress so teardown
+            // always completes past any broken callback.
+            TryPatch(harmony,
+                typeNames: new[] { "Il2CppFishNet.Object.NetworkObject" },
+                methodName: "InvokeStopCallbacks",
+                finalizer: nameof(NetworkObject_InvokeStopCallbacks_Finalizer),
+                label: "NetworkObject.InvokeStopCallbacks crash guard");
+
+            // Sled.FollowOwnerWhileInactive spams errors every FixedUpdate when the owner
+            // disconnects mid-game. Skip silently when there is no valid owner.
+            TryPatch(harmony,
+                typeNames: new[] { "Il2Cpp.Sled" },
+                methodName: "FollowOwnerWhileInactive",
+                prefix: nameof(Sled_FollowOwnerWhileInactive_Prefix),
+                label: "Sled.FollowOwnerWhileInactive null-owner guard");
 
             // ── Audio suppression ─────────────────────────────────────────────────────
             // -nographics does NOT suppress audio. Silence the game's audio managers.
@@ -158,7 +175,7 @@ namespace LobbyKit.Features.Headless
 
             try
             {
-                harmony.Patch(getter, prefix: new HarmonyMethod(typeof(HeadlessModePatches), nameof(SteamManager_Initialized_Prefix)));
+                harmony.Patch(getter, prefix: new HarmonyMethod(typeof(HeadlessPatches), nameof(SteamManager_Initialized_Prefix)));
                 MelonLogger.Msg("[HeadlessMode] Patched 'SteamManager.Initialized → true'.");
             }
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] SteamManager.Initialized patch failed: {ex.Message}"); }
@@ -197,7 +214,7 @@ namespace LobbyKit.Features.Headless
             if (m == null) return;
             try
             {
-                harmony.Patch(m, prefix: new HarmonyMethod(typeof(HeadlessModePatches), prefix));
+                harmony.Patch(m, prefix: new HarmonyMethod(typeof(HeadlessPatches), prefix));
                 MelonLogger.Msg($"[HeadlessMode] Patched '{label} → instant-pass in headless'.");
             }
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] Patch {label} failed: {ex.Message}"); }
@@ -230,7 +247,7 @@ namespace LobbyKit.Features.Headless
             if (method == null) { MelonLogger.Warning("[HeadlessMode] GetLocalUserId method not found — skipping patch."); return; }
             try
             {
-                harmony.Patch(method, prefix: new HarmonyMethod(typeof(HeadlessModePatches), nameof(GetLocalUserId_Prefix)));
+                harmony.Patch(method, prefix: new HarmonyMethod(typeof(HeadlessPatches), nameof(GetLocalUserId_Prefix)));
                 MelonLogger.Msg("[HeadlessMode] Patched 'EOSSingleton.GetLocalUserId → dummy in headless'.");
             }
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] GetLocalUserId patch failed: {ex.Message}"); }
@@ -1120,8 +1137,8 @@ namespace LobbyKit.Features.Headless
                 if (puidValid && gameInfo.PlayerId == null)
                     gameInfo.PlayerId = puid;
                 if (string.IsNullOrEmpty(gameInfo.PlayerName))
-                    gameInfo.PlayerName = !string.IsNullOrWhiteSpace(LobbyKitCore.ServerName)
-                        ? LobbyKitCore.ServerName : "HeadlessServer";
+                    gameInfo.PlayerName = !string.IsNullOrWhiteSpace(SledHeadlessCore.ServerName)
+                        ? SledHeadlessCore.ServerName : "HeadlessServer";
                 try { if (gameInfo.LobbyManager == null) gameInfo.LobbyManager = lm; } catch { }
 
                 MelonLogger.Msg($"[HeadlessMode] GameInfo after: PlayerId set={gameInfo.PlayerId != null}, PlayerName={gameInfo.PlayerName ?? "<null>"}");
@@ -1232,7 +1249,7 @@ namespace LobbyKit.Features.Headless
         // (Tugboat/KCP or FishyEOS) so FishNet registers with InstanceFinder.
         private static IEnumerator EnableHeadlessNetworkManager()
         {
-            if (!LobbyKitCore.HeadlessAutoHost) yield break;
+            if (!SledHeadlessCore.HeadlessAutoHost) yield break;
 
             // Poll for a NetworkManager — FishNet registers it via Awake when the GO is active.
             // In batchmode the full menu scene doesn't load, so NetworkManagers start inactive.
@@ -1287,7 +1304,7 @@ namespace LobbyKit.Features.Headless
 
         private static IEnumerator WaitForEosLoginAndAutoHost()
         {
-            if (!LobbyKitCore.HeadlessAutoHost) yield break;
+            if (!SledHeadlessCore.HeadlessAutoHost) yield break;
 
             MelonCoroutines.Start(SilenceAudio());
 
@@ -1480,16 +1497,16 @@ namespace LobbyKit.Features.Headless
 
             yield return new WaitForSecondsRealtime(0.5f);
 
-            string lobbyName = !string.IsNullOrWhiteSpace(LobbyKitCore.ServerName)
-                ? LobbyKitCore.ServerName : "Headless Server";
+            string lobbyName = !string.IsNullOrWhiteSpace(SledHeadlessCore.ServerName)
+                ? SledHeadlessCore.ServerName : "Headless Server";
 
-            MelonLogger.Msg($"[HeadlessMode] Calling LobbyManager.CreateLobby('{lobbyName}', {LobbyKitCore.ServerCapacity})...");
+            MelonLogger.Msg($"[HeadlessMode] Calling LobbyManager.CreateLobby('{lobbyName}', {SledHeadlessCore.ServerCapacity})...");
             try
             {
-                LobbyManager.Instance.CreateLobby(lobbyName, LobbyKitCore.ServerCapacity,
-                    LobbyKitCore.IsPublicLobby, false, LobbyKitCore.IsPasswordProtected,
-                    LobbyKitCore.LobbyPassword, LobbyKitCore.IsPeacefulMode,
-                    "Steam", string.Empty, true);
+                LobbyManager.Instance.CreateLobby(lobbyName, SledHeadlessCore.ServerCapacity,
+                    SledHeadlessCore.IsPublicLobby, true, SledHeadlessCore.IsPasswordProtected,
+                    SledHeadlessCore.LobbyPassword, SledHeadlessCore.IsPeacefulMode,
+                    string.Empty, string.Empty, false);
             }
             catch (Exception ex)
             {
@@ -1507,8 +1524,8 @@ namespace LobbyKit.Features.Headless
 
             if (serverStarted)
             {
-                LobbyKitCore.isHost = true;
-                LobbyKitCore.WasHosting = true;
+                SledHeadlessCore.isHost = true;
+                SledHeadlessCore.WasHosting = true;
                 MelonLogger.Msg("[HeadlessMode] Lobby hosted successfully! Launch your game and join.");
             }
             else
@@ -1631,6 +1648,26 @@ namespace LobbyKit.Features.Headless
             }
         }
 
+        // ── FishNet crash guards ──────────────────────────────────────────────────────
+
+        private static Exception NetworkObject_InvokeStopCallbacks_Finalizer(Exception __exception)
+        {
+            if (__exception != null)
+                MelonLogger.Warning($"[HeadlessMode] NetworkObject stop callback threw (suppressed): {__exception.GetType().Name}");
+            return null;
+        }
+
+        private static bool Sled_FollowOwnerWhileInactive_Prefix(Il2Cpp.Sled __instance)
+        {
+            try
+            {
+                var ownerSync = __instance.sync_Owner;
+                if (ownerSync == null || ownerSync.Value == null) return false;
+            }
+            catch { return false; }
+            return true;
+        }
+
         // ── TryPatch helper ───────────────────────────────────────────────────────────
 
         private static void TryPatch(HarmonyLib.Harmony harmony, string[] typeNames, string methodName,
@@ -1643,9 +1680,9 @@ namespace LobbyKit.Features.Headless
             var method = AccessTools.Method(targetType, methodName);
             if (method == null) { MelonLogger.Warning($"[HeadlessMode] Method '{label ?? methodName}' not found on {targetType.FullName}."); return; }
 
-            var prefixM = prefix != null ? new HarmonyMethod(typeof(HeadlessModePatches), prefix) : null;
-            var postfixM = postfix != null ? new HarmonyMethod(typeof(HeadlessModePatches), postfix) : null;
-            var finalizerM = finalizer != null ? new HarmonyMethod(typeof(HeadlessModePatches), finalizer) : null;
+            var prefixM = prefix != null ? new HarmonyMethod(typeof(HeadlessPatches), prefix) : null;
+            var postfixM = postfix != null ? new HarmonyMethod(typeof(HeadlessPatches), postfix) : null;
+            var finalizerM = finalizer != null ? new HarmonyMethod(typeof(HeadlessPatches), finalizer) : null;
 
             try
             {
