@@ -1,12 +1,8 @@
 using System;
 using System.Collections;
 using System.IO;
-using System.Net.Http;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Text.Json;
-using System.Threading.Tasks;
 using HarmonyLib;
 using Il2Cpp;
 using Il2CppFishNet;
@@ -405,9 +401,6 @@ namespace SledHeadless
         // for hooking and (optionally) for calling SteamAPI_Shutdown without a static import.
         private static IntPtr _steamApiModule = IntPtr.Zero;
 
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate void VoidDelegate();
-
         // ── Direct EOS C API for Device Auth ─────────────────────────────────────────
         // Il2CppInterop cannot bridge delegates whose parameters are non-blittable Il2Cpp
         // structs (the EOS callback info structs contain raw pointers), so we bypass the PEWS
@@ -592,65 +585,6 @@ namespace SledHeadless
             EosSdkCreateDeviceId(handle, ref opts, IntPtr.Zero, createCbPtr);
         }
 
-        /// <summary>
-        /// Coroutine: attempt EOS DeviceId login, creating the device credential first if needed.
-        /// This is the self-contained fallback path used when PEWS's
-        /// <c>StartConnectLoginWithDeviceToken</c> is not available via reflection.
-        ///
-        /// Flow:
-        ///   1. Send <c>EOS_Connect_Login</c> with DeviceId credentials.
-        ///   2. If login fails with <c>EOS_InvalidUser</c>: create device ID, then retry login.
-        ///   3. Leave <c>_deviceAuthSuccess</c> and <c>_rawProductUserId</c> for the caller.
-        /// </summary>
-        private static IEnumerator TryDeviceAuth(Il2CppEpic.OnlineServices.Connect.ConnectInterface connectInterface)
-        {
-            IntPtr handle     = connectInterface.InnerHandle;
-            IntPtr loginCbPtr = Marshal.GetFunctionPointerForDelegate(_pinnedLoginCb);
-            IntPtr createCbPtr = Marshal.GetFunctionPointerForDelegate(_pinnedCreateDeviceCb);
-            IntPtr displayNamePtr = Marshal.StringToHGlobalAnsi("HeadlessServer");
-
-            _deviceAuthDone = false;
-            _deviceAuthSuccess = false;
-            CallEosDeviceLogin(handle, displayNamePtr, loginCbPtr);
-            MelonLogger.Msg("[HeadlessMode] EOS_Connect_Login (Device Auth) sent — waiting...");
-
-            float t = Time.realtimeSinceStartup;
-            while (!_deviceAuthDone && Time.realtimeSinceStartup - t < 15f)
-                yield return new WaitForSecondsRealtime(0.25f);
-
-            if (!_deviceAuthDone) { MelonLogger.Warning("[HeadlessMode] Login callback never fired."); Marshal.FreeHGlobal(displayNamePtr); yield break; }
-            if (_deviceAuthSuccess) { Marshal.FreeHGlobal(displayNamePtr); yield break; }
-
-            // EOS_InvalidUser means no device ID — create it then retry.
-            MelonLogger.Msg("[HeadlessMode] No device ID — calling EOS_Connect_CreateDeviceId...");
-            _createDeviceIdDone = false;
-            _createDeviceIdSuccess = false;
-            CallEosCreateDeviceId(handle, createCbPtr);
-
-            t = Time.realtimeSinceStartup;
-            while (!_createDeviceIdDone && Time.realtimeSinceStartup - t < 15f)
-                yield return new WaitForSecondsRealtime(0.25f);
-
-            if (!_createDeviceIdDone || !_createDeviceIdSuccess)
-            {
-                MelonLogger.Warning("[HeadlessMode] CreateDeviceId failed.");
-                Marshal.FreeHGlobal(displayNamePtr);
-                yield break;
-            }
-
-            // Retry login after device ID created.
-            _deviceAuthDone = false;
-            _deviceAuthSuccess = false;
-            CallEosDeviceLogin(handle, displayNamePtr, loginCbPtr);
-            MelonLogger.Msg("[HeadlessMode] EOS_Connect_Login retry after CreateDeviceId...");
-
-            t = Time.realtimeSinceStartup;
-            while (!_deviceAuthDone && Time.realtimeSinceStartup - t < 15f)
-                yield return new WaitForSecondsRealtime(0.25f);
-
-            Marshal.FreeHGlobal(displayNamePtr);
-        }
-
         [DllImport("EOSSDK-Win64-Shipping", CallingConvention = CallingConvention.Cdecl)]
         private static extern void EOS_Connect_Login(IntPtr handle, ref EosConnectLoginOptions options, IntPtr clientData, IntPtr completionDelegate);
 
@@ -659,62 +593,6 @@ namespace SledHeadless
 
         [DllImport("EOSSDK-Win64-Shipping", CallingConvention = CallingConvention.Cdecl)]
         private static extern void EOS_Connect_CreateUser(IntPtr handle, ref EosCreateUserOptions options, IntPtr clientData, IntPtr completionDelegate);
-
-        // ── EOSLobbyManager OnConnectLogin trigger ────────────────────────────────────
-
-        /// <summary>
-        /// Manually fires <c>EOSLobbyManager.OnConnectLogin</c> with our PUID so that PEWS's
-        /// internal lobby manager initializes its <c>LocalProductUserId</c> and subscribes to
-        /// EOS lobby notification handles.
-        ///
-        /// Why: In the normal game flow, <c>EOSManager.EOSSingleton</c> calls
-        /// <c>OnConnectLogin</c> automatically after a successful <c>EOS_Connect_Login</c> via
-        /// its own callback chain. When we bypass that chain (P/Invoke direct login or
-        /// StartConnectLoginWithDeviceToken without the standard callback wiring), the
-        /// <c>EOSLobbyManager</c> never receives the login event and its internal state stays
-        /// uninitialized — causing NullRefs inside CreateLobby. This method synthesizes that
-        /// event with the correct PUID so the manager bootstraps itself properly.
-        /// </summary>
-        private static void FireEosLobbyManagerOnConnectLogin(EOSLobbyManager lobbyMgr)
-        {
-            if (lobbyMgr == null) return;
-
-            // Get ProductUserId from PEWS (set by StartConnectLoginWithDeviceToken or InjectPuid)
-            ProductUserId puid = null;
-            try { puid = EOSManager.Instance?.GetProductUserId(); } catch { }
-
-            if (puid == null || !puid.IsValid())
-            {
-                MelonLogger.Warning("[HeadlessMode] FireOnConnectLogin: no valid PUID from EOSManager.");
-                return;
-            }
-
-            // Build a Connect.LoginCallbackInfo with ResultCode=Success and our LocalUserId
-            try
-            {
-                var callbackType = typeof(Il2CppEpic.OnlineServices.Connect.LoginCallbackInfo);
-                var callbackInfo = (Il2CppEpic.OnlineServices.Connect.LoginCallbackInfo)
-                    Activator.CreateInstance(callbackType);
-
-                // Set ResultCode = Success (0) and LocalUserId = our puid
-                callbackType.GetProperty("ResultCode",
-                    BindingFlags.Instance | BindingFlags.Public)
-                    ?.SetValue(callbackInfo, Result.Success);
-                callbackType.GetProperty("LocalUserId",
-                    BindingFlags.Instance | BindingFlags.Public)
-                    ?.SetValue(callbackInfo, puid);
-
-                var onConnectLogin = AccessTools.Method(typeof(EOSLobbyManager), "OnConnectLogin");
-                if (onConnectLogin != null)
-                {
-                    onConnectLogin.Invoke(lobbyMgr, new object[] { callbackInfo });
-                    MelonLogger.Msg("[HeadlessMode] EOSLobbyManager.OnConnectLogin fired with PUID.");
-                }
-                else
-                    MelonLogger.Warning("[HeadlessMode] EOSLobbyManager.OnConnectLogin method not found.");
-            }
-            catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] FireOnConnectLogin: {ex.GetType().Name}: {ex.Message}"); }
-        }
 
         // ── EOS Auth service P/Invoke ─────────────────────────────────────────────────
         // EOS_Auth_Login obtains an Epic account-level session (EpicAccountId).
@@ -993,140 +871,6 @@ namespace SledHeadless
                 yield return new WaitForSecondsRealtime(0.25f);
         }
 
-        // ── EOS OAuth client-credentials flow ────────────────────────────────────────
-
-        /// <summary>
-        /// Fetches a service-level OAuth bearer token using the game's bundled ClientId and
-        /// ClientSecret against the EOS OAuth endpoint. The resulting <c>access_token</c> can
-        /// be used as an <c>EOS_ECT_OPENID_ACCESS_TOKEN</c> or similar credential type in
-        /// <c>EOS_Connect_Login</c>.
-        ///
-        /// Note: This is a client-credentials grant (machine-to-machine), not a user login.
-        /// It authenticates the application, not a player. Some EOS product configurations
-        /// do not allow client_credentials for Connect login — DeviceId is preferred.
-        /// </summary>
-        private static async Task<string> FetchEosClientToken()
-        {
-            const string clientId     = "xyza7891WyWUCOssWbPLjEm5PeZ2JcTC";
-            const string clientSecret = "58F6NQ5uGIMsa6dxQiYmzggu9yn8thzlI6hutGIP2Qk";
-            const string deploymentId = "2e613563d52a48e59968157fe00ae3d2";
-
-            using var http = new HttpClient();
-            var auth = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{clientId}:{clientSecret}"));
-            http.DefaultRequestHeaders.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", auth);
-
-            var body = new StringContent(
-                $"grant_type=client_credentials&deployment_id={deploymentId}",
-                Encoding.UTF8, "application/x-www-form-urlencoded");
-
-            var resp = await http.PostAsync("https://api.epicgames.dev/auth/v1/oauth/token", body);
-            var json = await resp.Content.ReadAsStringAsync();
-            MelonLogger.Msg($"[HeadlessMode] EOS OAuth: HTTP {(int)resp.StatusCode}");
-
-            if (!resp.IsSuccessStatusCode)
-            {
-                MelonLogger.Warning($"[HeadlessMode] EOS OAuth error: {json[..Math.Min(300, json.Length)]}");
-                return null;
-            }
-
-            var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("access_token", out var tok))
-                return tok.GetString();
-
-            MelonLogger.Warning("[HeadlessMode] No access_token in EOS response.");
-            return null;
-        }
-
-        // Sends EOS_Connect_Login with a generic token credential type (default 9 = OpenId).
-        // credType maps to EOS_EExternalCredentialType; caller picks the right value for the token.
-        private static void CallEosOpenIdLogin(IntPtr handle, IntPtr tokenPtr, IntPtr loginCbPtr, int credType = 9)
-        {
-            IntPtr credsPtr = Marshal.AllocHGlobal(24);
-            try
-            {
-                Marshal.WriteInt32(credsPtr, 0x0, 1);            // ApiVersion
-                Marshal.WriteIntPtr(credsPtr, 0x8, tokenPtr);    // Token = OAuth access_token
-                Marshal.WriteInt32(credsPtr, 0x10, credType);    // ExternalCredentialType
-
-                var opts = new EosConnectLoginOptions
-                {
-                    ApiVersion = 2,
-                    Credentials = credsPtr,
-                    UserLoginInfo = IntPtr.Zero
-                };
-                EosSdkLogin(handle, ref opts, IntPtr.Zero, loginCbPtr);
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(credsPtr);
-            }
-        }
-
-        // Coroutine wrapper around CallEosOpenIdLogin. Handles the first-time EOS_InvalidUser
-        // case by creating a Connect user with the ContinuanceToken and retrying, identical
-        // pattern to TryConnectWithEpicIdToken. Currently not invoked in the main boot path
-        // but kept as a ready fallback for products where DeviceId and PersistentAuth both fail.
-        private static IEnumerator TryOpenIdLogin(ConnectInterface connectInterface, string accessToken, int credType = 9)
-        {
-            IntPtr handle       = connectInterface.InnerHandle;
-            IntPtr loginCbPtr   = Marshal.GetFunctionPointerForDelegate(_pinnedLoginCb);
-            IntPtr createUserCb = Marshal.GetFunctionPointerForDelegate(_pinnedCreateUserCb);
-            IntPtr tokenPtr     = Marshal.StringToHGlobalAnsi(accessToken);
-
-            _deviceAuthDone = false;
-            _deviceAuthSuccess = false;
-            _loginContinuanceToken = IntPtr.Zero;
-            CallEosOpenIdLogin(handle, tokenPtr, loginCbPtr, credType);
-            MelonLogger.Msg($"[HeadlessMode] EOS_Connect_Login (credType={credType}) sent...");
-
-            float t = Time.realtimeSinceStartup;
-            while (!_deviceAuthDone && Time.realtimeSinceStartup - t < 30f)
-                yield return new WaitForSecondsRealtime(0.25f);
-
-            Marshal.FreeHGlobal(tokenPtr);
-
-            if (!_deviceAuthDone) { MelonLogger.Warning("[HeadlessMode] Login callback never fired."); yield break; }
-            if (_deviceAuthSuccess) yield break;
-
-            // EOS_InvalidUser: first login with this credential — create a Connect user account.
-            if (_loginContinuanceToken == IntPtr.Zero)
-            {
-                MelonLogger.Warning("[HeadlessMode] Login failed with no continuance token — can't create user.");
-                yield break;
-            }
-
-            MelonLogger.Msg("[HeadlessMode] EOS_Connect_CreateUser (first-time setup)...");
-            _createUserDone = false;
-            _createUserSuccess = false;
-            EosSdkCreateUser(handle, _loginContinuanceToken, createUserCb);
-
-            t = Time.realtimeSinceStartup;
-            while (!_createUserDone && Time.realtimeSinceStartup - t < 15f)
-                yield return new WaitForSecondsRealtime(0.25f);
-
-            if (!_createUserDone || !_createUserSuccess)
-            {
-                MelonLogger.Warning("[HeadlessMode] CreateUser failed.");
-                yield break;
-            }
-
-            // Retry login after account creation.
-            tokenPtr = Marshal.StringToHGlobalAnsi(accessToken);
-            _deviceAuthDone = false;
-            _deviceAuthSuccess = false;
-            _loginContinuanceToken = IntPtr.Zero;
-            CallEosOpenIdLogin(handle, tokenPtr, loginCbPtr);
-            MelonLogger.Msg("[HeadlessMode] EOS_Connect_Login retry after CreateUser...");
-
-            t = Time.realtimeSinceStartup;
-            while (!_deviceAuthDone && Time.realtimeSinceStartup - t < 30f)
-                yield return new WaitForSecondsRealtime(0.25f);
-
-            Marshal.FreeHGlobal(tokenPtr);
-        }
-
-
         /// <summary>
         /// Installs native hooks into <c>steam_api64.dll</c> to prevent the headless process
         /// from appearing on the real user's Steam account.
@@ -1211,65 +955,6 @@ namespace SledHeadless
         }
 
         // ── Steam disconnect after EOS auth ──────────────────────────────────────────────
-
-        /// <summary>
-        /// Calls <c>SteamAPI_Shutdown</c> to sever the live Steam IPC connection and clear the
-        /// "in game" status on the user's account.
-        ///
-        /// WARNING: This method is intentionally NOT called anywhere in the active boot flow.
-        /// Calling SteamAPI_Shutdown while Steam is running on the same machine causes a
-        /// deterministic hard crash ~1 second later because Unity's Steam integration continues
-        /// pumping callbacks into a now-dead Steam client. The fake SteamID spoof in
-        /// <see cref="PatchNativeSteamId"/> already prevents the headless from occupying the
-        /// real account slot, making shutdown unnecessary. This method is kept as a reference
-        /// in case a future build reverts to a Steam-free launch mode.
-        /// </summary>
-        private static void CallSteamApiShutdown()
-        {
-            if (_steamApiModule == IntPtr.Zero) { MelonLogger.Warning("[HeadlessMode] SteamAPI_Shutdown: module not loaded."); return; }
-            IntPtr addr = GetProcAddress(_steamApiModule, "SteamAPI_Shutdown");
-            if (addr == IntPtr.Zero) { MelonLogger.Warning("[HeadlessMode] SteamAPI_Shutdown not found in steam_api64."); return; }
-            var fn = Marshal.GetDelegateForFunctionPointer<VoidDelegate>(addr);
-            fn();
-            MelonLogger.Msg("[HeadlessMode] SteamAPI_Shutdown called — Steam 'in game' status should clear.");
-
-            // Hook RunCallbacks as a no-op so the game's update loop doesn't crash trying to
-            // pump a disconnected Steam client.
-            IntPtr rcAddr = GetProcAddress(_steamApiModule, "SteamAPI_RunCallbacks");
-            if (rcAddr != IntPtr.Zero)
-            {
-                try
-                {
-                    VoidDelegate noop = () => { };
-                    IntPtr noopPtr = Marshal.GetFunctionPointerForDelegate(noop);
-                    var hook = new MelonLoader.NativeUtils.NativeHook<VoidDelegate>(rcAddr, noopPtr);
-                    hook.Attach();
-                    _steamIdHooks.Add(hook); _steamIdHooks.Add(noop);
-                    MelonLogger.Msg("[HeadlessMode] Native hook: SteamAPI_RunCallbacks → no-op");
-                }
-                catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] Hook SteamAPI_RunCallbacks failed: {ex.Message}"); }
-            }
-        }
-
-        // ── SteamManager.StartConnectLoginWithSteamSessionTicket ─────────────────────
-        // Stub kept for reference. Steam auth proceeds naturally on machines where Steam is
-        // open; when it isn't, the boot bypass + DeviceId path handles login instead.
-        private static void PatchSteamConnectMethod(HarmonyLib.Harmony harmony)
-        {
-            string[] typeNames = {
-                "Il2CppPlayEveryWare.EpicOnlineServices.Samples.Steam.SteamManager",
-                "Il2CppPlayEveryWare.EpicOnlineServices.SteamManager"
-            };
-            Type steamType = null;
-            foreach (var name in typeNames) { steamType = AccessTools.TypeByName(name); if (steamType != null) break; }
-            if (steamType == null) { MelonLogger.Warning("[HeadlessMode] SteamManager type not found for steam connect patch."); return; }
-
-            // OnConnectLoginCallback is a nested type of EOSManager.EOSSingleton
-            var callbackType = AccessTools.TypeByName("Il2CppPlayEveryWare.EpicOnlineServices.EOSManager+OnConnectLoginCallback");
-            if (callbackType == null) { MelonLogger.Warning("[HeadlessMode] OnConnectLoginCallback type not found."); return; }
-
-            // No further patching — Steam auth proceeds naturally.
-        }
 
         // ── LobbyManager.CreateLobby null-field patches ───────────────────────────────
 
@@ -1810,7 +1495,7 @@ namespace SledHeadless
                 LobbyManager.Instance.CreateLobby(lobbyName, SledHeadlessCore.ServerCapacity,
                     SledHeadlessCore.IsPublicLobby, true, SledHeadlessCore.IsPasswordProtected,
                     SledHeadlessCore.LobbyPassword, SledHeadlessCore.IsPeacefulMode,
-                    string.Empty, string.Empty, false);
+                    "PC", string.Empty, false);
             }
             catch (Exception ex)
             {
