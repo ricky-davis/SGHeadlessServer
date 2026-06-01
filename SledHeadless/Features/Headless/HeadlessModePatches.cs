@@ -23,8 +23,31 @@ using Object = UnityEngine.Object;
 
 namespace SledHeadless
 {
+    /// <summary>
+    /// All Harmony patches and coroutines that make the game run as a headless EOS dedicated server.
+    ///
+    /// The game was never designed for headless operation — it assumes Steam is running, a human
+    /// is clicking through the boot screen, and a full Unity scene (UI, audio, input) is live.
+    /// This class surgically removes each of those assumptions so the process can:
+    ///   1. Boot past the DRM/preflight checkers without Steam or an Epic account.
+    ///   2. Authenticate with EOS using a DeviceId credential (machine-local, no user login).
+    ///   3. Create an EOS lobby via FishyEOS P2P so real game clients can join by code.
+    ///   4. Run silently (no audio, no input, no UI crashes) for the lifetime of the session.
+    /// </summary>
     internal static class HeadlessPatches
     {
+        /// <summary>
+        /// Registers every Harmony patch and starts every background coroutine needed for
+        /// headless operation. Called once from <see cref="SledHeadlessCore.OnInitializeMelon"/>
+        /// when <c>Application.isBatchMode</c> is true.
+        ///
+        /// Patch order matters in a few places:
+        ///   - Boot bypass must be registered before <c>BootSceneManager</c> ticks.
+        ///   - SteamManager.Initialized spoof must be in place before the EOSAuthenticator
+        ///     coroutine polls it; that coroutine starts when the boot scene loads.
+        ///   - Native SteamID hooks must be installed before Unity's Steam integration wakes
+        ///     (handled by <see cref="PatchNativeSteamId"/> at registration time, before Awake).
+        /// </summary>
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
             MelonLogger.Msg("[HeadlessMode] v43 Applying headless suppression patches...");
@@ -150,8 +173,20 @@ namespace SledHeadless
             MelonLogger.Msg("[HeadlessMode] Done.");
         }
 
+        /// <summary>
+        /// Harmony prefix used as a blanket "skip this method in headless" guard.
+        /// Returns false (skip original) only in batch mode; returns true (run original) otherwise
+        /// so normal game clients are completely unaffected.
+        /// Used for methods that are safe to no-op: input managers, voice comms, overlay init, etc.
+        /// </summary>
         private static bool SkipInHeadless() => !Application.isBatchMode;
 
+        /// <summary>
+        /// Harmony finalizer that silently swallows any exception thrown by the patched method,
+        /// but only in headless. Used on <c>UiReferenceController.Update</c> which continuously
+        /// polls UI state that is never initialized in batch mode, producing a wall of NullRef spam.
+        /// Returning null from a finalizer tells Harmony "no exception to propagate."
+        /// </summary>
         private static Exception SuppressNullRefInHeadless(Exception __exception)
         {
             if (!Application.isBatchMode) return __exception;
@@ -160,6 +195,18 @@ namespace SledHeadless
 
         // ── SteamManager.Initialized spoof ───────────────────────────────────────────
 
+        /// <summary>
+        /// Patches <c>SteamManager.Initialized</c> to always return true in headless.
+        ///
+        /// Why: The <c>EOSAuthenticator</c> boot coroutine polls <c>SteamManager.Initialized</c>
+        /// in a loop before it considers the EOS auth step complete. When the headless process
+        /// is started without Steam open (the normal case for a dedicated server), SteamAPI.Init
+        /// fails and <c>Initialized</c> stays false forever — so the boot loop never advances and
+        /// the main scene never loads. Returning true unblocks the coroutine immediately.
+        ///
+        /// This is safe because we don't actually need Steam auth; we use EOS DeviceId credentials
+        /// instead (see <see cref="WaitForEosLoginAndAutoHost"/>).
+        /// </summary>
         private static void PatchSteamManagerInitialized(HarmonyLib.Harmony harmony)
         {
             string[] typeNames = {
@@ -181,6 +228,7 @@ namespace SledHeadless
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] SteamManager.Initialized patch failed: {ex.Message}"); }
         }
 
+        // Harmony prefix for SteamManager.get_Initialized — short-circuits the getter.
         private static bool SteamManager_Initialized_Prefix(ref bool __result)
         {
             if (!Application.isBatchMode) return true;
@@ -190,6 +238,24 @@ namespace SledHeadless
 
         // ── Boot sequence bypass ──────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Patches the <c>IsBooted()</c> and <c>FailReason()</c> methods on every IBootable
+        /// checked by <c>BootSceneManager</c> so they all instantly report success in headless.
+        ///
+        /// How the game's boot flow works:
+        ///   <c>BootSceneManager</c> holds a list of <c>IBootable</c> objects and loops until
+        ///   every one returns <c>IsBooted() == true</c> and <c>FailReason() == None</c>.
+        ///   Only then does it load the main game scene (which contains <c>NetworkManager</c>).
+        ///
+        /// The bootables that would block a headless server:
+        ///   - <c>EOSAuthenticator</c>  — waits for Steam session ticket → EOS Connect auth.
+        ///   - <c>DLLChecker</c>        — verifies game integrity (fails in modded envs).
+        ///   - <c>EosPreflightBootable</c> — runs EOS preflight checks that require a display.
+        ///   - <c>PlayerPrefsManager</c> — reads/writes prefs that may be missing in batch mode.
+        ///
+        /// We bypass all of them so the main scene loads immediately, then handle EOS auth
+        /// ourselves in <see cref="WaitForEosLoginAndAutoHost"/>.
+        /// </summary>
         private static void PatchBootables(HarmonyLib.Harmony harmony)
         {
             string[] bootableTypes = {
@@ -208,6 +274,8 @@ namespace SledHeadless
             }
         }
 
+        // Patches a single method on a bootable type, logging a warning if the type or method
+        // no longer exists (game update renamed it) rather than crashing the mod entirely.
         private static void TryPatchBootable(HarmonyLib.Harmony harmony, Type t, string methodName, string prefix, string label)
         {
             var m = AccessTools.Method(t, methodName);
@@ -220,6 +288,7 @@ namespace SledHeadless
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] Patch {label} failed: {ex.Message}"); }
         }
 
+        // Prefix for IBootable.IsBooted() — reports "done" immediately so BootSceneManager advances.
         private static bool Bootable_IsBooted_Prefix(ref bool __result)
         {
             if (!Application.isBatchMode) return true;
@@ -227,6 +296,8 @@ namespace SledHeadless
             return false;
         }
 
+        // Prefix for IBootable.FailReason() — reports no failure so BootSceneManager doesn't
+        // show an error screen. Cast to int 0 avoids a hard dependency on the enum value name.
         private static bool Bootable_FailReason_Prefix(ref Il2Cpp_Scripts.Boot.FailReason __result)
         {
             if (!Application.isBatchMode) return true;
@@ -236,9 +307,18 @@ namespace SledHeadless
 
         // ── GetLocalUserId stub for DeviceId auth ─────────────────────────────────────
 
-        // When using DeviceId/Connect-only auth there's no EpicAccountId from the Auth service.
-        // The game's CreateLobby calls GetLocalUserId() and dereferences the result. Patch it
-        // to return a dummy non-null-but-invalid EpicAccountId so it doesn't throw.
+        /// <summary>
+        /// Patches <c>EOSSingleton.GetLocalUserId()</c> to return a dummy <c>EpicAccountId</c>
+        /// in headless instead of null.
+        ///
+        /// Why: The EOS Auth service (which issues <c>EpicAccountId</c>) is a separate system
+        /// from the EOS Connect service (which issues <c>ProductUserId</c>). DeviceId auth only
+        /// uses the Connect service, so there is never a real <c>EpicAccountId</c> available.
+        /// Several call sites in the game (notably <c>LobbyManager.CreateLobby</c>) call
+        /// <c>GetLocalUserId()</c> and immediately dereference the result without null-checking.
+        /// Returning a well-formed but semantically invalid ID prevents those NullReferenceExceptions
+        /// while being harmless — EOS ignores an invalid AccountId for DeviceId-authenticated lobbies.
+        /// </summary>
         private static void PatchGetLocalUserId(HarmonyLib.Harmony harmony)
         {
             var singletonType = AccessTools.TypeByName("Il2CppPlayEveryWare.EpicOnlineServices.EOSManager+EOSSingleton")
@@ -253,8 +333,12 @@ namespace SledHeadless
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] GetLocalUserId patch failed: {ex.Message}"); }
         }
 
+        // Cached once so we don't allocate a new EpicAccountId object on every call.
         private static EpicAccountId _dummyEpicAccountId;
 
+        // Prefix for EOSSingleton.GetLocalUserId(). The dummy value is a valid hex string
+        // (32 hex chars) that EpicAccountId.FromString accepts, but it will never correspond
+        // to a real account, so EOS treats it as an anonymous/unauthenticated identity.
         private static bool GetLocalUserId_Prefix(ref EpicAccountId __result)
         {
             if (!Application.isBatchMode) return true;
@@ -271,6 +355,11 @@ namespace SledHeadless
         }
 
         // ── Native SteamID spoof ─────────────────────────────────────────────────────
+        // Steam registers any process that calls SteamAPI_Init as "currently playing" on the
+        // account that owns the game. If the headless server and the real game share the same
+        // Steam account on the same machine, Steam would show two sessions and may refuse the
+        // second launch. We solve this at the native level by hooking the C functions that
+        // report the SteamID before the game (or EOS) has a chance to read or register them.
 
         [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Ansi)]
         private static extern IntPtr LoadLibrary([MarshalAs(UnmanagedType.LPStr)] string lpFileName);
@@ -282,7 +371,8 @@ namespace SledHeadless
         private static extern IntPtr GetModuleHandle([MarshalAs(UnmanagedType.LPStr)] string lpModuleName);
 
         // A fake but structurally valid Steam64 ID (universe=1, type=Individual, instance=1, accountID=1).
-        // Different from the real user's ID so Steam doesn't consider the headless "running as" them.
+        // Chosen to be distinct from any real user account so Steam does not conflate the headless
+        // process with the human playing the real game on the same machine.
         private const ulong FakeSteamId = 76561197960265729UL;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -306,9 +396,13 @@ namespace SledHeadless
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void BreakpadSetSteamIdDelegate(ulong steamId);
 
-        // Keep hooks alive for the lifetime of the process (GC would collect delegates otherwise).
+        // Holds every NativeHook object and its associated delegate so the GC cannot collect
+        // them. A collected delegate whose function pointer is still installed in the native
+        // hook table causes a crash on the next native call through that hook.
         private static readonly System.Collections.Generic.List<object> _steamIdHooks = new();
 
+        // Handle to steam_api64.dll — loaded explicitly so we can call GetProcAddress on it
+        // for hooking and (optionally) for calling SteamAPI_Shutdown without a static import.
         private static IntPtr _steamApiModule = IntPtr.Zero;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -316,10 +410,13 @@ namespace SledHeadless
 
         // ── Direct EOS C API for Device Auth ─────────────────────────────────────────
         // Il2CppInterop cannot bridge delegates whose parameters are non-blittable Il2Cpp
-        // structs, so we bypass PEWS entirely and call EOSSDK-Win64-Shipping.dll directly.
-
-        // Struct layouts mirror LoginOptionsInternal / CredentialsInternal / UserLoginInfoInternal
-        // from the Il2Cpp dump (verified offsets: ApiVersion@0x0, next field@0x8).
+        // structs (the EOS callback info structs contain raw pointers), so we bypass the PEWS
+        // managed wrappers entirely and call EOSSDK-Win64-Shipping.dll directly via P/Invoke.
+        //
+        // Struct layouts mirror *Internal variants from the Il2Cpp dump. Field offsets use
+        // LayoutKind.Explicit because the EOS SDK packs structs with 8-byte alignment on
+        // 64-bit Windows regardless of field size (e.g. int ApiVersion at 0x0, next ptr at 0x8).
+        // Verified against dump.cs offsets.
 
         [StructLayout(LayoutKind.Explicit)]
         private struct EosCredentials
@@ -368,7 +465,8 @@ namespace SledHeadless
             [FieldOffset(0x8)] public IntPtr ContinuanceToken;
         }
 
-        // Pinned delegates — static fields prevent GC collection.
+        // Static fields pin the delegates so the GC never collects them while the native EOS
+        // callback table still holds a raw function pointer to them.
         private static readonly EosLoginRawCallback _pinnedLoginCb = OnEosLoginCallback;
         private static readonly EosCreateDeviceIdRawCallback _pinnedCreateDeviceCb = OnEosCreateDeviceIdCallback;
 
@@ -376,17 +474,30 @@ namespace SledHeadless
         private delegate void EosCreateUserRawCallback(IntPtr info);
         private static readonly EosCreateUserRawCallback _pinnedCreateUserCb = OnEosCreateUserCallback;
 
+        // Shared state flags written by the P/Invoke callbacks and polled by the coroutine loop.
+        // These are not thread-safe but EOS callbacks fire on the same Unity main thread (via
+        // EOS SDK's tick mechanism inside EOSManager.Update), so no synchronisation is needed.
         private static bool _deviceAuthDone;
         private static bool _deviceAuthSuccess;
         private static bool _createDeviceIdDone;
         private static bool _createDeviceIdSuccess;
         private static bool _createUserDone;
         private static bool _createUserSuccess;
-        // ContinuanceToken from a failed EOS_Connect_Login — needed to create a new user.
+        // ContinuanceToken from a failed EOS_Connect_Login (EOS_InvalidUser) — EOS issues this
+        // token so the caller can pass it straight to EOS_Connect_CreateUser without re-authenticating.
         private static IntPtr _loginContinuanceToken;
 
+        // Raw ProductUserId handle from OnEosLoginCallback, used by the P/Invoke fallback path
+        // to inject the PUID into PEWS when StartConnectLoginWithDeviceToken is unavailable.
         private static IntPtr _rawProductUserId = IntPtr.Zero;
 
+        /// <summary>
+        /// Native callback for <c>EOS_Connect_Login</c>.
+        /// On success, captures the raw <c>ProductUserId</c> handle and signals the waiting
+        /// coroutine. On first-time failure (<c>EOS_InvalidUser</c>), EOS sets <c>ContinuanceToken</c>
+        /// instead of <c>LocalUserId</c> — we capture that too for the CreateUser retry path.
+        /// Struct layout: ResultCode@0x0, ClientData@0x8, LocalUserId@0x10, ContinuanceToken@0x18.
+        /// </summary>
         private static void OnEosLoginCallback(IntPtr info)
         {
             if (info == IntPtr.Zero) { _deviceAuthDone = true; return; }
@@ -395,22 +506,30 @@ namespace SledHeadless
             _deviceAuthSuccess = result == Result.Success;
             if (_deviceAuthSuccess)
                 _rawProductUserId = Marshal.ReadIntPtr(info, 0x10); // ProductUserId handle
-            _loginContinuanceToken = Marshal.ReadIntPtr(info, 0x18); // ContinuanceToken
+            _loginContinuanceToken = Marshal.ReadIntPtr(info, 0x18); // ContinuanceToken (set on EOS_InvalidUser)
             MelonLogger.Msg($"[HeadlessMode] EOS_Connect_Login callback: {result}");
             _deviceAuthDone = true;
         }
 
+        /// <summary>
+        /// Native callback for <c>EOS_Connect_CreateDeviceId</c>.
+        /// <c>DuplicateNotAllowed</c> (24) means a DeviceId credential already exists on this
+        /// machine — this is not an error; treat it the same as Success and proceed to login.
+        /// Raw value 1004 is an undocumented variant seen in some SDK versions for the same condition.
+        /// </summary>
         private static void OnEosCreateDeviceIdCallback(IntPtr info)
         {
             if (info == IntPtr.Zero) { _createDeviceIdDone = true; return; }
             int raw = Marshal.ReadInt32(info, 0x0);
             var result = (Result)raw;
-            // DuplicateNotAllowed (24) = device ID already exists, which is also a success
+            // DuplicateNotAllowed (24) = device ID already exists on this machine — also a success path
             _createDeviceIdSuccess = result == Result.Success || result == Result.DuplicateNotAllowed || raw == 1004;
             MelonLogger.Msg($"[HeadlessMode] EOS_Connect_CreateDeviceId callback: {result}");
             _createDeviceIdDone = true;
         }
 
+        // Native callback for EOS_Connect_CreateUser — called when we create a new EOS Connect
+        // account for this machine's DeviceId on first ever login.
         private static void OnEosCreateUserCallback(IntPtr info)
         {
             if (info == IntPtr.Zero) { _createUserDone = true; return; }
@@ -421,8 +540,15 @@ namespace SledHeadless
             _createUserDone = true;
         }
 
-        // Allocate structs in unmanaged heap so they're safe to reference from the
-        // non-iterator EosSdkLogin helper (avoids 'unsafe in iterator' restriction).
+        /// <summary>
+        /// Calls <c>EOS_Connect_Login</c> with <c>EOS_ECT_DEVICEID_ACCESS_TOKEN</c> credentials.
+        ///
+        /// Structs are allocated in unmanaged memory rather than declared as local value types
+        /// because C# iterators (yield-based coroutines) cannot take the address of locals —
+        /// they live on the heap as fields of the compiler-generated state machine class, which
+        /// moves them unpredictably. Unmanaged allocations have a fixed address for the duration
+        /// of the call. They are freed in the finally block before returning.
+        /// </summary>
         private static void CallEosDeviceLogin(IntPtr handle, IntPtr displayNamePtr, IntPtr loginCbPtr)
         {
             IntPtr credsPtr  = Marshal.AllocHGlobal(24);  // EosCredentials: ApiVersion@0, Token@8, Type@16
@@ -458,12 +584,24 @@ namespace SledHeadless
             }
         }
 
+        // Calls EOS_Connect_CreateDeviceId to register this machine's device credential.
+        // DeviceModel=null tells the SDK to use its built-in device fingerprint (hardware ID).
         private static void CallEosCreateDeviceId(IntPtr handle, IntPtr createCbPtr)
         {
             var opts = new EosCreateDeviceIdOptions { ApiVersion = 1, DeviceModel = IntPtr.Zero };
             EosSdkCreateDeviceId(handle, ref opts, IntPtr.Zero, createCbPtr);
         }
 
+        /// <summary>
+        /// Coroutine: attempt EOS DeviceId login, creating the device credential first if needed.
+        /// This is the self-contained fallback path used when PEWS's
+        /// <c>StartConnectLoginWithDeviceToken</c> is not available via reflection.
+        ///
+        /// Flow:
+        ///   1. Send <c>EOS_Connect_Login</c> with DeviceId credentials.
+        ///   2. If login fails with <c>EOS_InvalidUser</c>: create device ID, then retry login.
+        ///   3. Leave <c>_deviceAuthSuccess</c> and <c>_rawProductUserId</c> for the caller.
+        /// </summary>
         private static IEnumerator TryDeviceAuth(Il2CppEpic.OnlineServices.Connect.ConnectInterface connectInterface)
         {
             IntPtr handle     = connectInterface.InnerHandle;
@@ -524,8 +662,19 @@ namespace SledHeadless
 
         // ── EOSLobbyManager OnConnectLogin trigger ────────────────────────────────────
 
-        // Call EOSLobbyManager.OnConnectLogin with our ProductUserId so it initializes its
-        // internal state for lobby creation (LocalProductUserId, lobby interface handles, etc.).
+        /// <summary>
+        /// Manually fires <c>EOSLobbyManager.OnConnectLogin</c> with our PUID so that PEWS's
+        /// internal lobby manager initializes its <c>LocalProductUserId</c> and subscribes to
+        /// EOS lobby notification handles.
+        ///
+        /// Why: In the normal game flow, <c>EOSManager.EOSSingleton</c> calls
+        /// <c>OnConnectLogin</c> automatically after a successful <c>EOS_Connect_Login</c> via
+        /// its own callback chain. When we bypass that chain (P/Invoke direct login or
+        /// StartConnectLoginWithDeviceToken without the standard callback wiring), the
+        /// <c>EOSLobbyManager</c> never receives the login event and its internal state stays
+        /// uninitialized — causing NullRefs inside CreateLobby. This method synthesizes that
+        /// event with the correct PUID so the manager bootstraps itself properly.
+        /// </summary>
         private static void FireEosLobbyManagerOnConnectLogin(EOSLobbyManager lobbyMgr)
         {
             if (lobbyMgr == null) return;
@@ -635,8 +784,20 @@ namespace SledHeadless
         [DllImport("EOSSDK-Win64-Shipping", CallingConvention = CallingConvention.Cdecl)]
         private static extern int EOS_ProductUserId_ToString(IntPtr accountId, IntPtr outBuffer, ref int inOutBufferLength);
 
-        // Convert a native EOS ProductUserId handle to a managed ProductUserId by stringifying
-        // it (native → string → managed), then inject it into PEWS so CreateLobby sees a valid PUID.
+        /// <summary>
+        /// Bridges the gap between a raw native EOS <c>ProductUserId</c> pointer (obtained from
+        /// our P/Invoke callback) and the PEWS managed layer that <c>CreateLobby</c> relies on.
+        ///
+        /// Why this two-step conversion is required:
+        ///   - P/Invoke callbacks give us a raw <c>IntPtr</c> — an opaque EOS handle.
+        ///   - PEWS's <c>EOSManager.GetProductUserId()</c> returns a managed <c>ProductUserId</c>
+        ///     object that was created by PEWS's own callback path, which we bypassed.
+        ///   - <c>ProductUserId.FromString</c> is the only public way to construct a managed
+        ///     instance without going through PEWS's normal login flow.
+        ///   - After construction we push the value into PEWS via <c>SetLocalProductUserId</c>
+        ///     (method) and <c>s_localProductUserId</c> (field) as belt-and-suspenders, because
+        ///     the exact storage location varies across PEWS versions.
+        /// </summary>
         private static bool InjectPuidIntoEosManager(IntPtr rawPuid)
         {
             if (rawPuid == IntPtr.Zero) return false;
@@ -696,6 +857,8 @@ namespace SledHeadless
             return true;
         }
 
+        // Thin wrappers so callers don't have to pass ref on every site and the iterator
+        // restriction on unsafe/ref locals doesn't block coroutine code from calling these.
         private static void EosSdkLogin(IntPtr handle, ref EosConnectLoginOptions options, IntPtr clientData, IntPtr cb)
             => EOS_Connect_Login(handle, ref options, clientData, cb);
 
@@ -709,10 +872,20 @@ namespace SledHeadless
         }
 
         // ── EOS Auth + EpicIdToken Connect flow ──────────────────────────────────────
-        // Calls EOS_Auth_Login, then uses the resulting EpicAccountId to get an ID token,
-        // then calls EOS_Connect_Login with ExternalCredentialType=EpicIdToken (16).
-        // authType: 2=PersistentAuth (uses cached token, no credentials needed)
-        //           7=ExternalAuth+Epic (pass OAuth access_token as tokenPtr)
+
+        /// <summary>
+        /// Fallback auth path: obtain an <c>EpicAccountId</c> via the EOS Auth service, then
+        /// exchange it for an EOS Connect <c>ProductUserId</c> using the <c>EpicIdToken</c>
+        /// credential type. Used when DeviceId auth is unavailable (product configuration).
+        ///
+        /// <paramref name="authType"/>:
+        ///   2 = <c>PersistentAuth</c> — uses a locally-cached refresh token from a previous
+        ///       Epic account login; no credentials needed. Silent on servers that logged in once.
+        ///   7 = <c>ExternalAuth+Epic</c> — pass an OAuth access_token as <paramref name="tokenPtr"/>.
+        ///
+        /// The two-step flow (Auth → Connect) is required because the Connect service only accepts
+        /// <c>EpicIdToken</c> (a JWT signed by Epic's Auth service), not raw credentials.
+        /// </summary>
         private static IEnumerator TryEosAuthAndConnect(IntPtr authHandle, ConnectInterface connectIface, int authType, IntPtr tokenPtr, float authTimeoutSecs = 30f)
         {
             IntPtr credsPtr = Marshal.AllocHGlobal(0x30);
@@ -754,6 +927,9 @@ namespace SledHeadless
             yield return TryConnectWithEpicIdToken(connectIface, jwt);
         }
 
+        // Second half of TryEosAuthAndConnect: sends EOS_Connect_Login with the JWT obtained
+        // from EOS_Auth_CopyIdToken. Handles the first-time case (EOS_InvalidUser) by calling
+        // EOS_Connect_CreateUser with the ContinuanceToken before retrying the login.
         private static IEnumerator TryConnectWithEpicIdToken(ConnectInterface connectIface, string jwt)
         {
             IntPtr handle = connectIface.InnerHandle;
@@ -818,7 +994,17 @@ namespace SledHeadless
         }
 
         // ── EOS OAuth client-credentials flow ────────────────────────────────────────
-        // Fetches a service-level bearer token using the game's bundled ClientId/Secret.
+
+        /// <summary>
+        /// Fetches a service-level OAuth bearer token using the game's bundled ClientId and
+        /// ClientSecret against the EOS OAuth endpoint. The resulting <c>access_token</c> can
+        /// be used as an <c>EOS_ECT_OPENID_ACCESS_TOKEN</c> or similar credential type in
+        /// <c>EOS_Connect_Login</c>.
+        ///
+        /// Note: This is a client-credentials grant (machine-to-machine), not a user login.
+        /// It authenticates the application, not a player. Some EOS product configurations
+        /// do not allow client_credentials for Connect login — DeviceId is preferred.
+        /// </summary>
         private static async Task<string> FetchEosClientToken()
         {
             const string clientId     = "xyza7891WyWUCOssWbPLjEm5PeZ2JcTC";
@@ -852,6 +1038,8 @@ namespace SledHeadless
             return null;
         }
 
+        // Sends EOS_Connect_Login with a generic token credential type (default 9 = OpenId).
+        // credType maps to EOS_EExternalCredentialType; caller picks the right value for the token.
         private static void CallEosOpenIdLogin(IntPtr handle, IntPtr tokenPtr, IntPtr loginCbPtr, int credType = 9)
         {
             IntPtr credsPtr = Marshal.AllocHGlobal(24);
@@ -875,6 +1063,10 @@ namespace SledHeadless
             }
         }
 
+        // Coroutine wrapper around CallEosOpenIdLogin. Handles the first-time EOS_InvalidUser
+        // case by creating a Connect user with the ContinuanceToken and retrying, identical
+        // pattern to TryConnectWithEpicIdToken. Currently not invoked in the main boot path
+        // but kept as a ready fallback for products where DeviceId and PersistentAuth both fail.
         private static IEnumerator TryOpenIdLogin(ConnectInterface connectInterface, string accessToken, int credType = 9)
         {
             IntPtr handle       = connectInterface.InnerHandle;
@@ -935,6 +1127,23 @@ namespace SledHeadless
         }
 
 
+        /// <summary>
+        /// Installs native hooks into <c>steam_api64.dll</c> to prevent the headless process
+        /// from appearing on the real user's Steam account.
+        ///
+        /// Three categories of hooks are installed:
+        ///   1. <c>GetSteamID</c> getters — return <see cref="FakeSteamId"/> instead of the
+        ///      real account's ID. This makes Steam (and EOS, which reads it for session tickets)
+        ///      see the headless as a different user entirely.
+        ///   2. Breakpad crash handler registration — hooked as no-ops because registering a
+        ///      crash handler calls <c>SteamInternal_SetMinidumpSteamID</c> with the real ID,
+        ///      which would overwrite our fake ID and register the process on the real account.
+        ///   3. <c>Breakpad_SteamSetSteamID</c> — the direct upstream of
+        ///      <c>SteamInternal_SetMinidumpSteamID</c>; also no-oped for belt-and-suspenders.
+        ///
+        /// All hooks are stored in <see cref="_steamIdHooks"/> to prevent GC collection of the
+        /// delegate objects whose function pointers live in the native hook table.
+        /// </summary>
         private static void PatchNativeSteamId()
         {
             if (!Application.isBatchMode) return;
@@ -1003,10 +1212,18 @@ namespace SledHeadless
 
         // ── Steam disconnect after EOS auth ──────────────────────────────────────────────
 
-        // SteamAPI_Init success is what registers the process as "in game" on the user's
-        // Steam account via IPC. We need it to succeed first so PEWS can get a session ticket
-        // for EOS Connect auth. Once EOS has confirmed the login we no longer need Steam, so
-        // we call SteamAPI_Shutdown to sever the IPC connection and clear the "in game" status.
+        /// <summary>
+        /// Calls <c>SteamAPI_Shutdown</c> to sever the live Steam IPC connection and clear the
+        /// "in game" status on the user's account.
+        ///
+        /// WARNING: This method is intentionally NOT called anywhere in the active boot flow.
+        /// Calling SteamAPI_Shutdown while Steam is running on the same machine causes a
+        /// deterministic hard crash ~1 second later because Unity's Steam integration continues
+        /// pumping callbacks into a now-dead Steam client. The fake SteamID spoof in
+        /// <see cref="PatchNativeSteamId"/> already prevents the headless from occupying the
+        /// real account slot, making shutdown unnecessary. This method is kept as a reference
+        /// in case a future build reverts to a Steam-free launch mode.
+        /// </summary>
         private static void CallSteamApiShutdown()
         {
             if (_steamApiModule == IntPtr.Zero) { MelonLogger.Warning("[HeadlessMode] SteamAPI_Shutdown: module not loaded."); return; }
@@ -1034,8 +1251,9 @@ namespace SledHeadless
             }
         }
 
-        // ── SteamManager.StartConnectLoginWithSteamSessionTicket → DeviceAuth ───────────
-
+        // ── SteamManager.StartConnectLoginWithSteamSessionTicket ─────────────────────
+        // Stub kept for reference. Steam auth proceeds naturally on machines where Steam is
+        // open; when it isn't, the boot bypass + DeviceId path handles login instead.
         private static void PatchSteamConnectMethod(HarmonyLib.Harmony harmony)
         {
             string[] typeNames = {
@@ -1055,6 +1273,17 @@ namespace SledHeadless
 
         // ── LobbyManager.CreateLobby null-field patches ───────────────────────────────
 
+        /// <summary>
+        /// Harmony prefix for <c>LobbyManager.CreateLobby</c>. Runs immediately before
+        /// <c>CreateLobby</c> to initialize fields that the normal UI-driven flow would have
+        /// set up but that are null in headless because no human went through the menus.
+        ///
+        /// Fields pre-initialized here:
+        ///   - <c>LobbyJoiningEvent</c> (UnityEvent) — null if no UI has subscribed to it.
+        ///   - <c>LobbyHeartbeat</c> — null if the lobby system was never UI-activated.
+        ///   - <c>GameInfo.PlayerId</c> / <c>PlayerName</c> — null because our manual EOS login
+        ///     bypassed the code path that normally populates GameInfo from the Connect callback.
+        /// </summary>
         private static void LobbyManager_CreateLobby_PreInit(LobbyManager __instance)
         {
             if (!Application.isBatchMode) return;
@@ -1075,8 +1304,17 @@ namespace SledHeadless
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] PreInit diag: {ex.Message}"); }
         }
 
-        // Fire the post-login initialization the normal flow would have run on the EOSLobbyManager,
-        // and probe its raw field pointers so we can see exactly what is null before CreateLobby.
+        /// <summary>
+        /// Calls <c>EOSLobbyManager.OnLoggedIn()</c> to replicate the post-login initialization
+        /// that the normal PEWS callback chain would have triggered.
+        ///
+        /// Why needed: <c>OnLoggedIn</c> subscribes the manager to EOS lobby update and member
+        /// change notifications and resets <c>CurrentLobby</c> to a default state. Without it,
+        /// <c>CurrentLobby</c> (field@0x10) and <c>UserInfoManager</c> (field@0xA0) can remain
+        /// null, causing <c>CreateLobby</c> to NullRef deep inside the EOS SDK wrapper. The field
+        /// offsets are read from the Il2Cpp dump (EOSLobbyManager TypeDefIndex 21513) for
+        /// diagnostic logging before and after the call to confirm the state changed.
+        /// </summary>
         private static void InitEosLobbyManagerState(EOSLobbyManager mgr)
         {
             try
@@ -1109,10 +1347,16 @@ namespace SledHeadless
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] InitEosLobbyManagerState: {ex.GetType().Name}: {ex.Message}"); }
         }
 
-        // The game's LobbyManager.CreateLobby reads GameInfo.Instance.PlayerId (a ProductUserId at
-        // field 0x30) and calls a virtual method on it (e.g. ToString) to stamp the lobby owner.
-        // The normal EOS login sets GameInfo.PlayerId; we logged in manually and bypassed that, so it
-        // is null and CreateLobby NullRefs. Populate it from our Connect PUID before CreateLobby runs.
+        /// <summary>
+        /// Populates <c>GameInfo.PlayerId</c>, <c>PlayerName</c>, and <c>LobbyManager</c> from
+        /// our EOS Connect PUID before <c>CreateLobby</c> runs.
+        ///
+        /// Why needed: Disassembly of <c>LobbyManager.CreateLobby</c> at offset 0xCFD40 shows
+        /// a crash at offset 0xD0D53 that reads <c>GameInfo_TypeInfo → GameInfo.Instance →
+        /// PlayerId@0x30</c> and dereferences the result (calls a virtual on it). The normal
+        /// EOS login flow sets <c>GameInfo.PlayerId</c> from the Connect callback; our manual
+        /// login bypasses that, so <c>PlayerId</c> is null and <c>CreateLobby</c> NullRefs.
+        /// </summary>
         private static void EnsureGameInfoState(LobbyManager lm)
         {
             try
@@ -1146,6 +1390,9 @@ namespace SledHeadless
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] EnsureGameInfoState: {ex.GetType().Name}: {ex.Message}"); }
         }
 
+        // Creates a dummy LobbyHeartbeat wrapping an empty Lobby if the field is null.
+        // LobbyHeartbeat is normally set when the player first opens the lobby menu;
+        // in headless that UI never opens, so CreateLobby finds it null and NullRefs.
         private static void EnsureLobbyHeartbeat(LobbyManager instance)
         {
             try
@@ -1165,6 +1412,9 @@ namespace SledHeadless
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] EnsureLobbyHeartbeat: {ex.Message}"); }
         }
 
+        // Creates an empty UnityEvent on a LobbyManager property if it is null.
+        // The Il2CppInterop null check (val is Object o && o == null) is required because
+        // Il2Cpp wrapped objects can pass a C# null-check but still be a null native pointer.
         private static void EnsureUnityEvent(LobbyManager instance, string propName)
         {
             try
@@ -1180,6 +1430,11 @@ namespace SledHeadless
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] EnsureUnityEvent {propName}: {ex.Message}"); }
         }
 
+        // Harmony finalizer for CreateLobby — logs any exception with full stack trace then
+        // returns null to suppress it. Without suppression a throw inside CreateLobby would
+        // propagate through PEWS and FishNet, leaving the server in a partially started state
+        // with no useful error message. With suppression we get the full trace in the log and
+        // the server continues (FishNet may still start even if the EOS lobby creation failed).
         private static Exception LobbyManager_CreateLobby_Finalizer(Exception __exception)
         {
             if (!Application.isBatchMode) return __exception;
@@ -1197,6 +1452,16 @@ namespace SledHeadless
 
         // ── steamclient64 late hook ───────────────────────────────────────────────────
 
+        /// <summary>
+        /// Coroutine: waits for <c>steamclient64.dll</c> to be mapped into the process, then
+        /// hooks <c>SteamInternal_SetMinidumpSteamID</c> as a no-op.
+        ///
+        /// Why a coroutine: <c>steamclient64.dll</c> is loaded lazily by Steam's own IPC layer
+        /// after Unity's SteamManager.Awake, which is well after MelonLoader initialization.
+        /// It is not present in the module list at the time <see cref="PatchNativeSteamId"/> runs,
+        /// so we cannot hook it there. Polling with <c>GetModuleHandle</c> every 50ms catches it
+        /// the moment it appears and installs the hook before any code in the game calls through it.
+        /// </summary>
         private static IEnumerator HookSteamClientWhenLoaded()
         {
             if (!Application.isBatchMode) yield break;
@@ -1244,9 +1509,19 @@ namespace SledHeadless
 
         // ── Headless NetworkManager activation ───────────────────────────────────────
 
-        // In headless mode, the game never calls EnableCorrectNetworkManager() because no
-        // human is clicking UI buttons. Find MakeMyGameBuildReady and enable kcpNetworkManager
-        // (Tugboat/KCP or FishyEOS) so FishNet registers with InstanceFinder.
+        /// <summary>
+        /// Coroutine: activates the correct FishNet <c>NetworkManager</c> GameObject so
+        /// FishNet registers with <c>InstanceFinder</c> before <c>CreateLobby</c> is called.
+        ///
+        /// Why needed: The game ships two NetworkManagers — one wired to FishySteamworks (Steam P2P)
+        /// and one wired to FishyEOS (EOS P2P). Only the active one registers with InstanceFinder.
+        /// Normally a human clicking "Host" calls <c>EnableCorrectNetworkManager</c> which picks
+        /// the right one based on platform. In headless there is no UI interaction, so both start
+        /// inactive. We wait 3 seconds for the scene to finish loading, then activate the first
+        /// non-Steam, currently-inactive NetworkManager. The preference for inactive ones is
+        /// intentional: the Steam one is typically the scene's default active object; the EOS one
+        /// starts disabled.
+        /// </summary>
         private static IEnumerator EnableHeadlessNetworkManager()
         {
             if (!SledHeadlessCore.HeadlessAutoHost) yield break;
@@ -1300,8 +1575,37 @@ namespace SledHeadless
 
         // ── Auto-host coroutine ───────────────────────────────────────────────────────
 
+        // Cached reference to the EOSLobbyManager retrieved from LobbyManager._lobbyManager.
+        // Kept alive to support LogHostDiagnostics queries after CreateLobby completes.
         private static EOSLobbyManager _eosLobbyManager;
 
+        /// <summary>
+        /// Main headless boot orchestrator. Runs as a MelonLoader coroutine after all patches
+        /// are installed. Coordinates every step needed to create a live EOS lobby:
+        ///
+        ///   Phase 1 — EOS Login (up to 20s):
+        ///     Wait for the game's normal Steam-based EOS Connect login to complete.
+        ///     This succeeds if Steam is open on the machine; skipped if it times out.
+        ///
+        ///   Phase 2a — DeviceId auth (no Steam required):
+        ///     Call <c>EOS_Connect_CreateDeviceId</c> then invoke PEWS's
+        ///     <c>StartConnectLoginWithDeviceToken</c> via reflection so PEWS fires its own
+        ///     <c>OnConnectLogin</c> event chain and fully initializes <c>EOSLobbyManager</c>.
+        ///     Falls back to a direct P/Invoke login + <see cref="InjectPuidIntoEosManager"/>
+        ///     if the reflection path is unavailable.
+        ///
+        ///   Phase 2b — PersistentAuth fallback:
+        ///     If DeviceId is disabled for this product, try <c>EOS_Auth_Login(PersistentAuth)</c>
+        ///     which uses a locally cached refresh token from any prior Epic account login.
+        ///
+        ///   Post-login:
+        ///     - Wait for <c>LobbyManager</c> to become available.
+        ///     - Poll <c>LobbyManager._lobbyManager</c> until the <c>EOSLobbyManager</c> is set.
+        ///     - Call <see cref="InitEosLobbyManagerState"/> to ensure post-login initialization ran.
+        ///     - Wait for FishNet <c>ServerManager</c> to register (depends on NetworkManager Awake).
+        ///     - Call <c>LobbyManager.CreateLobby</c> with values from <c>MelonPreferences</c>.
+        ///     - Poll for join code and log it clearly so the user can enter it in-game.
+        /// </summary>
         private static IEnumerator WaitForEosLoginAndAutoHost()
         {
             if (!SledHeadlessCore.HeadlessAutoHost) yield break;
@@ -1560,6 +1864,16 @@ namespace SledHeadless
             LogHostDiagnostics();
         }
 
+        /// <summary>
+        /// Logs post-host diagnostic information to help confirm the server is correctly set up:
+        ///   1. The EOS lobby — verifies the lobby is live and advertised on EOS (clients can
+        ///      discover and join it). If <c>GetCurrentLobby()</c> returns null here, the EOS
+        ///      lobby creation failed silently and clients won't be able to find the server.
+        ///   2. The active FishNet transport — tells us whether clients will connect via EOS P2P
+        ///      (FishyEOS, keyed on our valid PUID — this works) or Steam P2P (FishySteamworks,
+        ///      keyed on our fake SteamID — this will not route correctly). If Multipass is active,
+        ///      enumerates sub-transports to find the concrete one.
+        /// </summary>
         private static void LogHostDiagnostics()
         {
             // EOS lobby — confirms the lobby is actually advertised on EOS (discoverable/joinable).
@@ -1612,8 +1926,16 @@ namespace SledHeadless
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] transport diag: {ex.GetType().Name}: {ex.Message}"); }
         }
 
-        // Il2CppInterop's managed GetType() returns the declared wrapper type (often a base class).
-        // Read the concrete runtime class name straight from the native il2cpp object.
+        /// <summary>
+        /// Returns the concrete runtime class name of an Il2Cpp object by reading it from the
+        /// native il2cpp metadata, bypassing Il2CppInterop's managed wrapper layer.
+        ///
+        /// Why: <c>Il2CppInterop</c> wraps every Il2Cpp class with a C# proxy class. For types
+        /// that have no specific proxy (e.g. a third-party transport assembly we didn't generate
+        /// bindings for), <c>GetType()</c> returns the base wrapper type (e.g. <c>Transport</c>)
+        /// not the concrete runtime type (<c>FishyEOS</c>). Calling <c>il2cpp_class_get_name</c>
+        /// directly on the native pointer always returns the correct runtime class name.
+        /// </summary>
         private static string NativeIl2CppClassName(object il2cppObj)
         {
             try
@@ -1628,6 +1950,17 @@ namespace SledHeadless
             catch (Exception ex) { return $"<err {ex.GetType().Name}>"; }
         }
 
+        /// <summary>
+        /// Coroutine: continuously enforces audio silence every frame for the lifetime of the process.
+        ///
+        /// Why continuous enforcement is necessary: the game's settings system re-applies the saved
+        /// <c>MasterVolume</c> value when the main scene finishes loading (~40s after boot, because
+        /// the boot bypass lets the main scene load). This overwrites a one-time mute set at startup.
+        /// Reasserting <c>AudioListener.volume=0</c> and <c>AudioListener.pause=true</c> every frame
+        /// ensures the game can never un-mute the headless. <c>AudioListener</c> is a global Unity
+        /// static — setting it once affects all audio in the process (no FMOD/Wwise on this game).
+        /// The cost is negligible: two property writes per frame.
+        /// </summary>
         private static IEnumerator SilenceAudio()
         {
             // The game's settings system applies the saved MasterVolume and un-pauses audio when the
@@ -1650,6 +1983,18 @@ namespace SledHeadless
 
         // ── FishNet crash guards ──────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Harmony finalizer for <c>NetworkObject.InvokeStopCallbacks</c>. Suppresses any
+        /// exception thrown by a network object's stop callbacks.
+        ///
+        /// Why needed: When a client disconnects, FishNet calls <c>InvokeStopCallbacks</c> on
+        /// every <c>NetworkObject</c> owned by that client. If any callback throws (e.g. a
+        /// <c>TrinketPack</c> whose owner sync-var is null after a crash), FishNet's despawn
+        /// loop aborts mid-iteration. Objects remain stuck in a half-despawned state and
+        /// subsequent clients that join get stuck on the loading screen because the server
+        /// cannot complete the object-state sync handshake. Suppressing the exception lets
+        /// teardown continue past any broken callback so the server stays in a valid state.
+        /// </summary>
         private static Exception NetworkObject_InvokeStopCallbacks_Finalizer(Exception __exception)
         {
             if (__exception != null)
@@ -1657,6 +2002,18 @@ namespace SledHeadless
             return null;
         }
 
+        /// <summary>
+        /// Harmony prefix for <c>Sled.FollowOwnerWhileInactive</c>. Skips the method when the
+        /// sled has no valid owner.
+        ///
+        /// Why needed: <c>FollowOwnerWhileInactive</c> runs every <c>FixedUpdate</c>. When a
+        /// player disconnects mid-game, the sled's <c>sync_Owner</c> sync-var can be null or
+        /// point to a disconnected player. The method already has an early-return for null
+        /// owners, but the Unity error logging happens before that check fires — producing a
+        /// continuous wall of "Owner is null!" errors in the server log. Short-circuiting here
+        /// prevents the spam without changing the behaviour (the method would have returned
+        /// immediately anyway).
+        /// </summary>
         private static bool Sled_FollowOwnerWhileInactive_Prefix(Il2Cpp.Sled __instance)
         {
             try
@@ -1670,6 +2027,13 @@ namespace SledHeadless
 
         // ── TryPatch helper ───────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Resolves a type by trying each name in <paramref name="typeNames"/> in order (handles
+        /// namespace changes across game updates), finds the named method, and applies the
+        /// requested Harmony prefix/postfix/finalizer. Logs a warning instead of throwing if
+        /// the type or method is not found — the mod continues loading with reduced functionality
+        /// rather than failing completely.
+        /// </summary>
         private static void TryPatch(HarmonyLib.Harmony harmony, string[] typeNames, string methodName,
             string prefix = null, string postfix = null, string finalizer = null, string label = null)
         {
