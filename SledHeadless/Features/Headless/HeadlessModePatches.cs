@@ -1268,18 +1268,14 @@ namespace SledHeadless
         /// Main headless boot orchestrator. Runs as a MelonLoader coroutine after all patches
         /// are installed. Coordinates every step needed to create a live EOS lobby:
         ///
-        ///   Phase 1 — EOS Login (up to 20s):
-        ///     Wait for the game's normal Steam-based EOS Connect login to complete.
-        ///     This succeeds if Steam is open on the machine; skipped if it times out.
-        ///
-        ///   Phase 2a — DeviceId auth (no Steam required):
+        ///   Phase 1 — DeviceId auth:
         ///     Call <c>EOS_Connect_CreateDeviceId</c> then invoke PEWS's
         ///     <c>StartConnectLoginWithDeviceToken</c> via reflection so PEWS fires its own
         ///     <c>OnConnectLogin</c> event chain and fully initializes <c>EOSLobbyManager</c>.
         ///     Falls back to a direct P/Invoke login + <see cref="InjectPuidIntoEosManager"/>
         ///     if the reflection path is unavailable.
         ///
-        ///   Phase 2b — PersistentAuth fallback:
+        ///   Phase 2 — PersistentAuth fallback:
         ///     If DeviceId is disabled for this product, try <c>EOS_Auth_Login(PersistentAuth)</c>
         ///     which uses a locally cached refresh token from any prior Epic account login.
         ///
@@ -1297,144 +1293,114 @@ namespace SledHeadless
 
             MelonCoroutines.Start(SilenceAudio());
 
-            // Phase 1: wait for Steam-based EOS login (succeeds when Steam is running).
-            // Timeout is short — if Steam is closed it will never arrive.
-            MelonLogger.Msg("[HeadlessMode] Waiting for EOS Connect login (Steam)...");
-            float elapsed = 0f;
             bool loggedIn = false;
-            while (elapsed < 20f)
+
+            // Phase 1: DeviceId auth — machine-local credential, no Steam or Epic account needed.
+            IntPtr authHandle = IntPtr.Zero;
+            ConnectInterface connectIface = null;
+            try
             {
-                yield return new WaitForSecondsRealtime(0.5f);
-                elapsed += 0.5f;
-                try
-                {
-                    if (EOSManager.Instance?.HasLoggedInWithConnect() == true) { loggedIn = true; break; }
-                    var puid = EOSManager.Instance?.GetProductUserId();
-                    if (puid != null && puid.IsValid()) { loggedIn = true; break; }
-                }
-                catch { }
+                var platform = EOSManager.Instance?.GetEOSPlatformInterface();
+                authHandle = platform?.GetAuthInterface()?.InnerHandle ?? IntPtr.Zero;
+                connectIface = platform?.GetConnectInterface();
             }
+            catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] GetPlatformInterfaces: {ex.Message}"); }
 
-            // Phase 2: multiple auth paths, no Steam required.
-            if (!loggedIn)
+            if (connectIface == null)
             {
-                IntPtr authHandle = IntPtr.Zero;
-                ConnectInterface connectIface = null;
-                try
-                {
-                    var platform = EOSManager.Instance?.GetEOSPlatformInterface();
-                    authHandle = platform?.GetAuthInterface()?.InnerHandle ?? IntPtr.Zero;
-                    connectIface = platform?.GetConnectInterface();
-                }
-                catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] GetPlatformInterfaces: {ex.Message}"); }
+                MelonLogger.Warning("[HeadlessMode] Could not get EOS Connect interface.");
+            }
+            else
+            {
+                IntPtr handle = connectIface.InnerHandle;
+                IntPtr loginCbPtr = Marshal.GetFunctionPointerForDelegate(_pinnedLoginCb);
+                IntPtr createCbPtr = Marshal.GetFunctionPointerForDelegate(_pinnedCreateDeviceCb);
+                IntPtr modelPtr = Marshal.StringToHGlobalAnsi("HeadlessServer");
 
-                if (connectIface == null)
+                MelonLogger.Msg("[HeadlessMode] Trying EOS_Connect_CreateDeviceId...");
+                _createDeviceIdDone = false;
+                _createDeviceIdSuccess = false;
+                var devIdOpts = new EosCreateDeviceIdOptions { ApiVersion = 1, DeviceModel = modelPtr };
+                EosSdkCreateDeviceId(handle, ref devIdOpts, IntPtr.Zero, createCbPtr);
+
+                float tdv = Time.realtimeSinceStartup;
+                while (!_createDeviceIdDone && Time.realtimeSinceStartup - tdv < 10f)
+                    yield return new WaitForSecondsRealtime(0.25f);
+                Marshal.FreeHGlobal(modelPtr);
+
+                if (_createDeviceIdSuccess)
                 {
-                    MelonLogger.Warning("[HeadlessMode] Could not get EOS Connect interface.");
+                    // Use PEWS's own StartConnectLoginWithDeviceToken so it fires all internal
+                    // OnConnectLogin events and properly initializes EOSLobbyManager.
+                    // Passing null callback is safe — PEWS checks null before invoking it.
+                    bool pewsLoginStarted = false;
+                    try
+                    {
+                        var singleton = EOSManager.Instance;
+                        var singletonType = singleton?.GetType()
+                            ?? AccessTools.TypeByName("Il2CppPlayEveryWare.EpicOnlineServices.EOSManager+EOSSingleton");
+                        var startMethod = singletonType != null ? AccessTools.Method(singletonType, "StartConnectLoginWithDeviceToken") : null;
+                        if (startMethod != null && singleton != null)
+                        {
+                            startMethod.Invoke(singleton, new object[] { "HeadlessServer", null });
+                            MelonLogger.Msg("[HeadlessMode] StartConnectLoginWithDeviceToken called via reflection.");
+                            pewsLoginStarted = true;
+                        }
+                        else
+                            MelonLogger.Warning($"[HeadlessMode] StartConnectLoginWithDeviceToken not found (type={singletonType?.Name}, method={startMethod != null}).");
+                    }
+                    catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] StartConnectLoginWithDeviceToken: {ex.Message}"); }
+
+                    if (pewsLoginStarted)
+                    {
+                        float tpews = Time.realtimeSinceStartup;
+                        while (Time.realtimeSinceStartup - tpews < 15f)
+                        {
+                            yield return new WaitForSecondsRealtime(0.5f);
+                            try
+                            {
+                                if (EOSManager.Instance?.HasLoggedInWithConnect() == true) { loggedIn = true; break; }
+                                var puid = EOSManager.Instance?.GetProductUserId();
+                                if (puid != null && puid.IsValid()) { loggedIn = true; break; }
+                            }
+                            catch { }
+                        }
+                        if (!loggedIn) MelonLogger.Warning("[HeadlessMode] PEWS connect login did not complete.");
+                    }
+
+                    if (!loggedIn)
+                    {
+                        // Fallback: P/Invoke direct login + inject PUID
+                        MelonLogger.Msg("[HeadlessMode] Falling back to P/Invoke DeviceId login...");
+                        IntPtr displayNamePtr = Marshal.StringToHGlobalAnsi("HeadlessServer");
+                        _deviceAuthDone = false; _deviceAuthSuccess = false;
+                        _rawProductUserId = IntPtr.Zero;
+                        CallEosDeviceLogin(handle, displayNamePtr, loginCbPtr);
+                        float tl = Time.realtimeSinceStartup;
+                        while (!_deviceAuthDone && Time.realtimeSinceStartup - tl < 15f)
+                            yield return new WaitForSecondsRealtime(0.25f);
+                        Marshal.FreeHGlobal(displayNamePtr);
+                        loggedIn = _deviceAuthSuccess;
+                        if (loggedIn)
+                            InjectPuidIntoEosManager(_rawProductUserId);
+                    }
                 }
                 else
+                    MelonLogger.Msg("[HeadlessMode] DeviceId unavailable (disabled for this product).");
+
+                // Phase 2: PersistentAuth — uses cached refresh token from any prior Epic account login.
+                if (!loggedIn && authHandle != IntPtr.Zero)
                 {
-                    // 2a: DeviceId with explicit DeviceModel (retry — earlier attempt used null)
-                    IntPtr handle = connectIface.InnerHandle;
-                    IntPtr loginCbPtr = Marshal.GetFunctionPointerForDelegate(_pinnedLoginCb);
-                    IntPtr createCbPtr = Marshal.GetFunctionPointerForDelegate(_pinnedCreateDeviceCb);
-                    IntPtr modelPtr = Marshal.StringToHGlobalAnsi("HeadlessServer");
-
-                    MelonLogger.Msg("[HeadlessMode] Trying EOS_Connect_CreateDeviceId (explicit DeviceModel)...");
-                    _createDeviceIdDone = false;
-                    _createDeviceIdSuccess = false;
-                    var devIdOpts = new EosCreateDeviceIdOptions { ApiVersion = 1, DeviceModel = modelPtr };
-                    EosSdkCreateDeviceId(handle, ref devIdOpts, IntPtr.Zero, createCbPtr);
-
-                    float tdv = Time.realtimeSinceStartup;
-                    while (!_createDeviceIdDone && Time.realtimeSinceStartup - tdv < 10f)
-                        yield return new WaitForSecondsRealtime(0.25f);
-                    Marshal.FreeHGlobal(modelPtr);
-
-                    if (_createDeviceIdSuccess)
-                    {
-                        MelonLogger.Msg("[HeadlessMode] DeviceId ready. Triggering PEWS connect login...");
-
-                        // Use PEWS's own StartConnectLoginWithDeviceToken so it fires all internal
-                        // OnConnectLogin events and properly initializes EOSLobbyManager.
-                        // Passing null callback is safe — PEWS checks null before invoking it.
-                        bool pewsLoginStarted = false;
-                        try
-                        {
-                            // EOSManager.Instance returns EOSManager.EOSSingleton — the method is on that type
-                            var singleton = EOSManager.Instance;
-                            var singletonType = singleton?.GetType()
-                                ?? AccessTools.TypeByName("Il2CppPlayEveryWare.EpicOnlineServices.EOSManager+EOSSingleton");
-                            var startMethod = singletonType != null ? AccessTools.Method(singletonType, "StartConnectLoginWithDeviceToken") : null;
-                            if (startMethod != null && singleton != null)
-                            {
-                                startMethod.Invoke(singleton, new object[] { "HeadlessServer", null });
-                                MelonLogger.Msg("[HeadlessMode] StartConnectLoginWithDeviceToken called via reflection.");
-                                pewsLoginStarted = true;
-                            }
-                            else
-                                MelonLogger.Warning($"[HeadlessMode] StartConnectLoginWithDeviceToken not found (type={singletonType?.Name}, method={startMethod != null}).");
-                        }
-                        catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] StartConnectLoginWithDeviceToken: {ex.Message}"); }
-
-                        if (pewsLoginStarted)
-                        {
-                            // Wait for PEWS to complete the login internally
-                            float tpews = Time.realtimeSinceStartup;
-                            while (Time.realtimeSinceStartup - tpews < 15f)
-                            {
-                                yield return new WaitForSecondsRealtime(0.5f);
-                                try
-                                {
-                                    if (EOSManager.Instance?.HasLoggedInWithConnect() == true) { loggedIn = true; break; }
-                                    var puid = EOSManager.Instance?.GetProductUserId();
-                                    if (puid != null && puid.IsValid()) { loggedIn = true; break; }
-                                }
-                                catch { }
-                            }
-                            if (!loggedIn) MelonLogger.Warning("[HeadlessMode] PEWS connect login did not complete.");
-                        }
-
-                        if (!loggedIn)
-                        {
-                            // Fallback: P/Invoke direct login + inject PUID
-                            MelonLogger.Msg("[HeadlessMode] Falling back to P/Invoke DeviceId login...");
-                            IntPtr displayNamePtr = Marshal.StringToHGlobalAnsi("HeadlessServer");
-                            _deviceAuthDone = false; _deviceAuthSuccess = false;
-                            _rawProductUserId = IntPtr.Zero;
-                            CallEosDeviceLogin(handle, displayNamePtr, loginCbPtr);
-                            float tl = Time.realtimeSinceStartup;
-                            while (!_deviceAuthDone && Time.realtimeSinceStartup - tl < 15f)
-                                yield return new WaitForSecondsRealtime(0.25f);
-                            Marshal.FreeHGlobal(displayNamePtr);
-                            loggedIn = _deviceAuthSuccess;
-                            if (loggedIn)
-                                InjectPuidIntoEosManager(_rawProductUserId);
-                        }
-                    }
-                    else
-                        MelonLogger.Msg("[HeadlessMode] DeviceId unavailable (disabled for this product).");
-
-                    // 2b: PersistentAuth — uses cached refresh token from any prior login
-                    if (!loggedIn && authHandle != IntPtr.Zero)
-                    {
-                        MelonLogger.Msg("[HeadlessMode] Trying EOS_Auth_Login (PersistentAuth)...");
-                        yield return TryEosAuthAndConnect(authHandle, connectIface, 2, IntPtr.Zero);
-                        loggedIn = _deviceAuthSuccess;
-                    }
+                    MelonLogger.Msg("[HeadlessMode] Trying EOS_Auth_Login (PersistentAuth)...");
+                    yield return TryEosAuthAndConnect(authHandle, connectIface, 2, IntPtr.Zero);
+                    loggedIn = _deviceAuthSuccess;
                 }
             }
 
-            if (!loggedIn) { MelonLogger.Warning("[HeadlessMode] EOS login failed via all methods (Steam, PersistentAuth, app token, AccountPortal)."); yield break; }
+            if (!loggedIn) { MelonLogger.Warning("[HeadlessMode] EOS login failed — DeviceId and PersistentAuth both failed."); yield break; }
             MelonLogger.Msg("[HeadlessMode] EOS Connect login confirmed.");
-            // NOTE: We deliberately do NOT call SteamAPI_Shutdown here. We authenticate via EOS
-            // DeviceId (Steam-independent), so Steam is never needed for our auth. When Steam IS
-            // running on the machine, calling SteamAPI_Shutdown tears down the live Steam session
-            // mid-boot and hard-crashes the process ~1s later (deterministic). The native fake-
-            // SteamID spoof already prevents this headless from occupying the real account slot,
-            // so shutting Steam down serves no purpose. Leave Steam alone.
 
-            elapsed = 0f;
+            float elapsed = 0f;
             while (LobbyManager.Instance == null && elapsed < 30f)
             {
                 yield return new WaitForSecondsRealtime(0.1f);
