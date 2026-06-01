@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -47,6 +48,12 @@ namespace SledHeadless
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
             MelonLogger.Msg("[HeadlessMode] v43 Applying headless suppression patches...");
+
+            // Silence Harmony's per-patch "WARNING AccessTools.GetTypesFromAssembly" spam.
+            // Every harmony.Patch() call internally scans assemblies; UnityEngine.CoreModule
+            // has a broken IdentityAttributes type that always throws ReflectionTypeLoadException,
+            // and Harmony logs the full exception. We patch the scanner itself to swallow it silently.
+            SuppressHarmonyAssemblyScanWarnings(harmony);
 
             TryPatch(harmony,
                 typeNames: new[] { "Il2CppRewired.InputManager_Base", "Il2CppRewired.InputManager" },
@@ -120,13 +127,13 @@ namespace SledHeadless
             // ── Audio suppression ─────────────────────────────────────────────────────
             // -nographics does NOT suppress audio. Silence the game's audio managers.
             TryPatch(harmony,
-                typeNames: new[] { "Il2Cpp_Scripts.SoundEffectManager", "Il2Cpp.SoundEffectManager" },
+                typeNames: new[] { "Il2Cpp.SoundEffectManager", "Il2Cpp_Scripts.SoundEffectManager" },
                 methodName: "Awake",
                 prefix: nameof(SkipInHeadless),
                 label: "SoundEffectManager.Awake");
 
             TryPatch(harmony,
-                typeNames: new[] { "Il2Cpp_Scripts.MusicController", "Il2Cpp.MusicController" },
+                typeNames: new[] { "Il2Cpp.MusicController", "Il2Cpp_Scripts.MusicController" },
                 methodName: "Awake",
                 prefix: nameof(SkipInHeadless),
                 label: "MusicController.Awake");
@@ -155,16 +162,17 @@ namespace SledHeadless
             // real user's account slot in Steam.
             PatchNativeSteamId();
 
-            // steamclient64.dll loads later (after Unity's Steam integration wakes up).
-            // Poll for it in a coroutine and hook SteamInternal_SetMinidumpSteamID the
-            // moment it's available — before it can register this process with Steam.
-            MelonCoroutines.Start(HookSteamClientWhenLoaded());
-
             // Enable the non-Steam NetworkManager immediately so FishNet registers with
             // InstanceFinder before CreateLobby is called. In headless without Steam we
             // want the KCP/Tugboat or EOS P2P NetworkManager, not the Steam one.
-            MelonCoroutines.Start(EnableHeadlessNetworkManager());
+            Application.quitting += (Il2CppSystem.Action)(() =>
+            {
+                _isQuitting = true;
+                foreach (var detach in _hookDetachActions) { try { detach(); } catch { } }
+            });
 
+            MelonCoroutines.Start(SilenceAudio());
+            MelonCoroutines.Start(EnableHeadlessNetworkManager());
             MelonCoroutines.Start(WaitForEosLoginAndAutoHost());
             MelonLogger.Msg("[HeadlessMode] Done.");
         }
@@ -175,7 +183,7 @@ namespace SledHeadless
         /// so normal game clients are completely unaffected.
         /// Used for methods that are safe to no-op: input managers, voice comms, overlay init, etc.
         /// </summary>
-        private static bool SkipInHeadless() => !Application.isBatchMode;
+        private static bool SkipInHeadless() => !Application.isBatchMode && !_isQuitting;
 
         /// <summary>
         /// Harmony finalizer that silently swallows any exception thrown by the patched method,
@@ -185,7 +193,7 @@ namespace SledHeadless
         /// </summary>
         private static Exception SuppressNullRefInHeadless(Exception __exception)
         {
-            if (!Application.isBatchMode) return __exception;
+            if (!Application.isBatchMode || _isQuitting) return __exception;
             return null;
         }
 
@@ -374,12 +382,6 @@ namespace SledHeadless
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate ulong GetSteamIdDelegate(IntPtr self);
 
-        // SteamInternal_SetMinidumpSteamID tells Steam which account owns this process.
-        // It's called from within the Breakpad crash handler setup. Hooking the entry point
-        // (SteamAPI_UseBreakpadCrashHandler) as a no-op prevents it ever being called.
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate void SetMinidumpSteamIdDelegate(ulong steamId);
-
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void UseBreakpadCrashHandlerDelegate(
             IntPtr pchVersion, IntPtr pchDate, IntPtr pchTime, int bFullMemoryDumps, IntPtr pvContext, IntPtr m_pfnPreMinidumpCallback);
@@ -392,10 +394,20 @@ namespace SledHeadless
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void BreakpadSetSteamIdDelegate(ulong steamId);
 
+        // Set to true when Unity begins quitting. Harmony patch prefixes check this so they
+        // return cleanly instead of executing during teardown, which prevents the flood of
+        // "During invoking native->managed trampoline" errors that fill the shutdown log.
+        private static bool _isQuitting = false;
+
         // Holds every NativeHook object and its associated delegate so the GC cannot collect
         // them. A collected delegate whose function pointer is still installed in the native
         // hook table causes a crash on the next native call through that hook.
         private static readonly System.Collections.Generic.List<object> _steamIdHooks = new();
+
+        // Detach callbacks for each installed native hook. Called on Application.quitting so
+        // the native detour pointers are removed before the CLR tears down managed delegates,
+        // eliminating the "During invoking native->managed trampoline" error at shutdown.
+        private static readonly System.Collections.Generic.List<Action> _hookDetachActions = new();
 
         // Handle to steam_api64.dll — loaded explicitly so we can call GetProcAddress on it
         // for hooking and (optionally) for calling SteamAPI_Shutdown without a static import.
@@ -438,11 +450,11 @@ namespace SledHeadless
         [StructLayout(LayoutKind.Explicit)]
         private struct EosCreateDeviceIdOptions
         {
-            [FieldOffset(0x0)] public int ApiVersion;   // = 1
-            [FieldOffset(0x8)] public IntPtr DeviceModel; // null = use default
+            [FieldOffset(0x0)] public int ApiVersion;     // = 1
+            [FieldOffset(0x8)] public IntPtr DeviceModel; // null = use default hardware fingerprint
         }
 
-        // LoginCallbackInfoInternal: ResultCode@0x0, ClientData@0x8, LocalUserId@0x10
+// LoginCallbackInfoInternal: ResultCode@0x0, ClientData@0x8, LocalUserId@0x10
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void EosLoginRawCallback(IntPtr info);
 
@@ -922,6 +934,7 @@ namespace SledHeadless
                     var hook = new MelonLoader.NativeUtils.NativeHook<GetSteamIdDelegate>(addr, detourPtr);
                     hook.Attach();
                     _steamIdHooks.Add(hook); _steamIdHooks.Add(detour);
+                    _hookDetachActions.Add(() => hook.Detach());
                     MelonLogger.Msg($"[HeadlessMode] Native hook: {name} → FakeSteamId ({FakeSteamId})");
                 }
                 catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] Hook {name} failed: {ex.Message}"); }
@@ -939,6 +952,7 @@ namespace SledHeadless
                     var hook = new MelonLoader.NativeUtils.NativeHook<T>(addr, detourPtr);
                     hook.Attach();
                     _steamIdHooks.Add(hook); _steamIdHooks.Add(detour);
+                    _hookDetachActions.Add(() => hook.Detach());
                     MelonLogger.Msg($"[HeadlessMode] Native hook: {name} → no-op");
                 }
                 catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] Hook {name} failed: {ex.Message}"); }
@@ -1137,117 +1151,57 @@ namespace SledHeadless
 
         // ── steamclient64 late hook ───────────────────────────────────────────────────
 
-        /// <summary>
-        /// Coroutine: waits for <c>steamclient64.dll</c> to be mapped into the process, then
-        /// hooks <c>SteamInternal_SetMinidumpSteamID</c> as a no-op.
-        ///
-        /// Why a coroutine: <c>steamclient64.dll</c> is loaded lazily by Steam's own IPC layer
-        /// after Unity's SteamManager.Awake, which is well after MelonLoader initialization.
-        /// It is not present in the module list at the time <see cref="PatchNativeSteamId"/> runs,
-        /// so we cannot hook it there. Polling with <c>GetModuleHandle</c> every 50ms catches it
-        /// the moment it appears and installs the hook before any code in the game calls through it.
-        /// </summary>
-        private static IEnumerator HookSteamClientWhenLoaded()
-        {
-            if (!Application.isBatchMode) yield break;
-
-            // Poll until steamclient64.dll is mapped into this process.
-            // It loads during Unity's native Steam integration startup, well after MelonLoader.
-            IntPtr clientModule = IntPtr.Zero;
-            float elapsed = 0f;
-            while (elapsed < 30f)
-            {
-                clientModule = GetModuleHandle("steamclient64");
-                if (clientModule == IntPtr.Zero) clientModule = GetModuleHandle("steamclient");
-                if (clientModule != IntPtr.Zero) break;
-                yield return new WaitForSecondsRealtime(0.05f);
-                elapsed += 0.05f;
-            }
-
-            if (clientModule == IntPtr.Zero)
-            {
-                MelonLogger.Warning("[HeadlessMode] steamclient64.dll never loaded — SteamInternal_SetMinidumpSteamID not hooked.");
-                yield break;
-            }
-
-            MelonLogger.Msg("[HeadlessMode] steamclient64 loaded — hooking SteamInternal_SetMinidumpSteamID.");
-
-            IntPtr addr = GetProcAddress(clientModule, "SteamInternal_SetMinidumpSteamID");
-            if (addr == IntPtr.Zero)
-            {
-                MelonLogger.Warning("[HeadlessMode] SteamInternal_SetMinidumpSteamID not found in steamclient64.");
-                yield break;
-            }
-
-            try
-            {
-                SetMinidumpSteamIdDelegate detour = id =>
-                    MelonLogger.Msg($"[HeadlessMode] Suppressed SteamInternal_SetMinidumpSteamID({id})");
-                IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(detour);
-                var hook = new MelonLoader.NativeUtils.NativeHook<SetMinidumpSteamIdDelegate>(addr, detourPtr);
-                hook.Attach();
-                _steamIdHooks.Add(hook); _steamIdHooks.Add(detour);
-                MelonLogger.Msg("[HeadlessMode] Native hook: SteamInternal_SetMinidumpSteamID → no-op");
-            }
-            catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] Hook SteamInternal_SetMinidumpSteamID failed: {ex.Message}"); }
-        }
-
         // ── Headless NetworkManager activation ───────────────────────────────────────
 
         /// <summary>
-        /// Coroutine: activates the correct FishNet <c>NetworkManager</c> GameObject so
-        /// FishNet registers with <c>InstanceFinder</c> before <c>CreateLobby</c> is called.
+        /// Coroutine: activates the "Network Manager (EOS)" GameObject so FishNet registers
+        /// with <c>InstanceFinder</c> before <c>CreateLobby</c> is called.
         ///
         /// Why needed: The game ships two NetworkManagers — one wired to FishySteamworks (Steam P2P)
         /// and one wired to FishyEOS (EOS P2P). Only the active one registers with InstanceFinder.
         /// Normally a human clicking "Host" calls <c>EnableCorrectNetworkManager</c> which picks
-        /// the right one based on platform. In headless there is no UI interaction, so both start
-        /// inactive. We wait 3 seconds for the scene to finish loading, then activate the first
-        /// non-Steam, currently-inactive NetworkManager. The preference for inactive ones is
-        /// intentional: the Steam one is typically the scene's default active object; the EOS one
-        /// starts disabled.
+        /// the right one. In headless there is no UI interaction, so we activate the EOS one directly.
+        ///
+        /// Why polling: The main scene loads asynchronously after the boot sequence completes.
+        /// A fixed wait is too short; we poll until NetworkManagers appear in the loaded scene.
         /// </summary>
         private static IEnumerator EnableHeadlessNetworkManager()
         {
             if (!SledHeadlessCore.HeadlessAutoHost) yield break;
 
-            // Poll for a NetworkManager — FishNet registers it via Awake when the GO is active.
-            // In batchmode the full menu scene doesn't load, so NetworkManagers start inactive.
-            // Use Resources.FindObjectsOfTypeAll which includes inactive objects.
-            yield return new WaitForSecondsRealtime(3f);
-
-            var allNMs = Resources.FindObjectsOfTypeAll<Il2CppFishNet.Managing.NetworkManager>();
-            MelonLogger.Msg($"[HeadlessMode] Found {(allNMs?.Count ?? 0)} NetworkManager(s) total.");
-
-            if (allNMs == null || allNMs.Count == 0) { MelonLogger.Warning("[HeadlessMode] No NetworkManager found."); yield break; }
-
-            // Log all found NetworkManagers to understand the scene structure
-            foreach (var nm in allNMs)
+            // Poll until the main scene loads and NetworkManagers appear.
+            // Resources.FindObjectsOfTypeAll includes inactive GameObjects (which the EOS NM starts as).
+            Il2CppFishNet.Managing.NetworkManager[] allNMs = null;
+            float nmPollStart = Time.realtimeSinceStartup;
+            while (Time.realtimeSinceStartup - nmPollStart < 120f)
             {
-                try { MelonLogger.Msg($"[HeadlessMode] NetworkManager: {nm.gameObject.name} active={nm.gameObject.activeSelf}"); }
-                catch { }
+                yield return new WaitForSecondsRealtime(1f);
+                allNMs = Resources.FindObjectsOfTypeAll<Il2CppFishNet.Managing.NetworkManager>();
+                if (allNMs != null && allNMs.Length > 0) break;
             }
 
-            // Enable the first non-Steam NetworkManager (prefer inactive ones — they're the non-default)
+            MelonLogger.Msg($"[HeadlessMode] Found {(allNMs?.Length ?? 0)} NetworkManager(s) after {Time.realtimeSinceStartup - nmPollStart:F1}s.");
+
+            if (allNMs == null || allNMs.Length == 0) { MelonLogger.Warning("[HeadlessMode] No NetworkManager found — scene may not have loaded."); yield break; }
+
+            foreach (var nm in allNMs)
+                try { MelonLogger.Msg($"[HeadlessMode] NetworkManager: '{nm.gameObject.name}' active={nm.gameObject.activeSelf}"); } catch { }
+
+            // Prefer "Network Manager (EOS)" by name — that's the FishyEOS transport NM.
+            // Fall back to any non-Steam inactive NM, then any inactive NM, then whatever exists.
             Il2CppFishNet.Managing.NetworkManager target = null;
             foreach (var nm in allNMs)
-            {
-                try
-                {
-                    string name = nm.gameObject.name?.ToLower() ?? "";
-                    bool isSteam = name.Contains("steam");
-                    if (!isSteam && !nm.gameObject.activeSelf) { target = nm; break; }
-                }
-                catch { }
-            }
+                try { if (nm.gameObject.name?.Contains("EOS") == true) { target = nm; break; } } catch { }
 
-            // Fallback: use first inactive one
+            if (target == null)
+                foreach (var nm in allNMs)
+                    try { if (!nm.gameObject.name?.ToLower().Contains("steam") == true && !nm.gameObject.activeSelf) { target = nm; break; } } catch { }
+
             if (target == null)
                 foreach (var nm in allNMs)
                     try { if (!nm.gameObject.activeSelf) { target = nm; break; } } catch { }
 
-            // Fallback: use first one period
-            if (target == null && allNMs.Count > 0) target = allNMs[0];
+            if (target == null && allNMs.Length > 0) target = allNMs[0];
 
             if (target != null)
             {
@@ -1268,12 +1222,11 @@ namespace SledHeadless
         /// Main headless boot orchestrator. Runs as a MelonLoader coroutine after all patches
         /// are installed. Coordinates every step needed to create a live EOS lobby:
         ///
-        ///   Phase 1 — DeviceId auth:
-        ///     Call <c>EOS_Connect_CreateDeviceId</c> then invoke PEWS's
-        ///     <c>StartConnectLoginWithDeviceToken</c> via reflection so PEWS fires its own
-        ///     <c>OnConnectLogin</c> event chain and fully initializes <c>EOSLobbyManager</c>.
-        ///     Falls back to a direct P/Invoke login + <see cref="InjectPuidIntoEosManager"/>
-        ///     if the reflection path is unavailable.
+        ///   Phase 1 — P/Invoke DeviceId auth (no Steam, no Epic account):
+        ///     Call <c>EOS_Connect_CreateDeviceId</c> then <c>EOS_Connect_Login</c> directly
+        ///     via P/Invoke. PEWS's <c>StartConnectLoginWithDeviceToken</c> was tried but
+        ///     internally waits for a Steam session ticket before calling EOS_Connect_Login,
+        ///     which times out in headless. The P/Invoke path completes in &lt;1s.
         ///
         ///   Phase 2 — PersistentAuth fallback:
         ///     If DeviceId is disabled for this product, try <c>EOS_Auth_Login(PersistentAuth)</c>
@@ -1291,11 +1244,22 @@ namespace SledHeadless
         {
             if (!SledHeadlessCore.HeadlessAutoHost) yield break;
 
-            MelonCoroutines.Start(SilenceAudio());
-
             bool loggedIn = false;
 
-            // Phase 1: DeviceId auth — machine-local credential, no Steam or Epic account needed.
+            // Wait for EOSManager to initialize the EOS Platform before touching any EOS APIs.
+            // Platform initialization is async and typically takes 15-20s after boot. Calling
+            // EOS_Connect_CreateDeviceId before the platform is ready queues the request internally,
+            // and the callback fires only when the platform finishes — adding unnecessary latency.
+            MelonLogger.Msg("[HeadlessMode] Waiting for EOS Platform to initialize...");
+            float eosInitStart = Time.realtimeSinceStartup;
+            while (Time.realtimeSinceStartup - eosInitStart < 60f)
+            {
+                yield return new WaitForSecondsRealtime(0.25f);
+                try { if (EOSManager.Instance?.GetEOSPlatformInterface() != null) break; } catch { }
+            }
+            float eosInitTime = Time.realtimeSinceStartup - eosInitStart;
+            MelonLogger.Msg($"[HeadlessMode] EOS Platform ready after {eosInitTime:F1}s.");
+
             IntPtr authHandle = IntPtr.Zero;
             ConnectInterface connectIface = null;
             try
@@ -1306,11 +1270,11 @@ namespace SledHeadless
             }
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] GetPlatformInterfaces: {ex.Message}"); }
 
-            if (connectIface == null)
-            {
-                MelonLogger.Warning("[HeadlessMode] Could not get EOS Connect interface.");
-            }
-            else
+            // Phase 1: P/Invoke DeviceId — directly call EOS_Connect_CreateDeviceId + EOS_Connect_Login.
+            // PEWS's StartConnectLoginWithDeviceToken was tried first but internally waits for a Steam
+            // session ticket before calling EOS_Connect_Login, which times out in headless. P/Invoke
+            // bypasses PEWS entirely and completes in < 1s once EOS Platform is ready.
+            if (connectIface != null)
             {
                 IntPtr handle = connectIface.InnerHandle;
                 IntPtr loginCbPtr = Marshal.GetFunctionPointerForDelegate(_pinnedLoginCb);
@@ -1330,63 +1294,19 @@ namespace SledHeadless
 
                 if (_createDeviceIdSuccess)
                 {
-                    // Use PEWS's own StartConnectLoginWithDeviceToken so it fires all internal
-                    // OnConnectLogin events and properly initializes EOSLobbyManager.
-                    // Passing null callback is safe — PEWS checks null before invoking it.
-                    bool pewsLoginStarted = false;
-                    try
-                    {
-                        var singleton = EOSManager.Instance;
-                        var singletonType = singleton?.GetType()
-                            ?? AccessTools.TypeByName("Il2CppPlayEveryWare.EpicOnlineServices.EOSManager+EOSSingleton");
-                        var startMethod = singletonType != null ? AccessTools.Method(singletonType, "StartConnectLoginWithDeviceToken") : null;
-                        if (startMethod != null && singleton != null)
-                        {
-                            startMethod.Invoke(singleton, new object[] { "HeadlessServer", null });
-                            MelonLogger.Msg("[HeadlessMode] StartConnectLoginWithDeviceToken called via reflection.");
-                            pewsLoginStarted = true;
-                        }
-                        else
-                            MelonLogger.Warning($"[HeadlessMode] StartConnectLoginWithDeviceToken not found (type={singletonType?.Name}, method={startMethod != null}).");
-                    }
-                    catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] StartConnectLoginWithDeviceToken: {ex.Message}"); }
-
-                    if (pewsLoginStarted)
-                    {
-                        float tpews = Time.realtimeSinceStartup;
-                        while (Time.realtimeSinceStartup - tpews < 15f)
-                        {
-                            yield return new WaitForSecondsRealtime(0.5f);
-                            try
-                            {
-                                if (EOSManager.Instance?.HasLoggedInWithConnect() == true) { loggedIn = true; break; }
-                                var puid = EOSManager.Instance?.GetProductUserId();
-                                if (puid != null && puid.IsValid()) { loggedIn = true; break; }
-                            }
-                            catch { }
-                        }
-                        if (!loggedIn) MelonLogger.Warning("[HeadlessMode] PEWS connect login did not complete.");
-                    }
-
-                    if (!loggedIn)
-                    {
-                        // Fallback: P/Invoke direct login + inject PUID
-                        MelonLogger.Msg("[HeadlessMode] Falling back to P/Invoke DeviceId login...");
-                        IntPtr displayNamePtr = Marshal.StringToHGlobalAnsi("HeadlessServer");
-                        _deviceAuthDone = false; _deviceAuthSuccess = false;
-                        _rawProductUserId = IntPtr.Zero;
-                        CallEosDeviceLogin(handle, displayNamePtr, loginCbPtr);
-                        float tl = Time.realtimeSinceStartup;
-                        while (!_deviceAuthDone && Time.realtimeSinceStartup - tl < 15f)
-                            yield return new WaitForSecondsRealtime(0.25f);
-                        Marshal.FreeHGlobal(displayNamePtr);
-                        loggedIn = _deviceAuthSuccess;
-                        if (loggedIn)
-                            InjectPuidIntoEosManager(_rawProductUserId);
-                    }
+                    IntPtr displayNamePtr = Marshal.StringToHGlobalAnsi("HeadlessServer");
+                    _deviceAuthDone = false; _deviceAuthSuccess = false;
+                    _rawProductUserId = IntPtr.Zero;
+                    CallEosDeviceLogin(handle, displayNamePtr, loginCbPtr);
+                    float tl = Time.realtimeSinceStartup;
+                    while (!_deviceAuthDone && Time.realtimeSinceStartup - tl < 15f)
+                        yield return new WaitForSecondsRealtime(0.25f);
+                    Marshal.FreeHGlobal(displayNamePtr);
+                    loggedIn = _deviceAuthSuccess;
+                    if (loggedIn) InjectPuidIntoEosManager(_rawProductUserId);
                 }
                 else
-                    MelonLogger.Msg("[HeadlessMode] DeviceId unavailable (disabled for this product).");
+                    MelonLogger.Warning("[HeadlessMode] DeviceId unavailable (disabled for this product).");
 
                 // Phase 2: PersistentAuth — uses cached refresh token from any prior Epic account login.
                 if (!loggedIn && authHandle != IntPtr.Zero)
@@ -1396,6 +1316,8 @@ namespace SledHeadless
                     loggedIn = _deviceAuthSuccess;
                 }
             }
+            else
+                MelonLogger.Warning("[HeadlessMode] EOS Connect interface unavailable after platform init.");
 
             if (!loggedIn) { MelonLogger.Warning("[HeadlessMode] EOS login failed — DeviceId and PersistentAuth both failed."); yield break; }
             MelonLogger.Msg("[HeadlessMode] EOS Connect login confirmed.");
@@ -1619,7 +1541,7 @@ namespace SledHeadless
             // overridden, so re-assert AudioListener.volume=0 + pause every frame. It's a global
             // Unity static (no FMOD/Wwise here), so this guarantees silence. Cheap on a headless server.
             bool logged = false;
-            while (true)
+            while (!_isQuitting)
             {
                 try
                 {
@@ -1648,6 +1570,7 @@ namespace SledHeadless
         /// </summary>
         private static Exception NetworkObject_InvokeStopCallbacks_Finalizer(Exception __exception)
         {
+            if (_isQuitting) return __exception;
             if (__exception != null)
                 MelonLogger.Warning($"[HeadlessMode] NetworkObject stop callback threw (suppressed): {__exception.GetType().Name}");
             return null;
@@ -1667,6 +1590,7 @@ namespace SledHeadless
         /// </summary>
         private static bool Sled_FollowOwnerWhileInactive_Prefix(Il2Cpp.Sled __instance)
         {
+            if (_isQuitting) return false;
             try
             {
                 var ownerSync = __instance.sync_Owner;
@@ -1674,6 +1598,34 @@ namespace SledHeadless
             }
             catch { return false; }
             return true;
+        }
+
+        // ── Harmony log suppression ───────────────────────────────────────────────────
+
+        // Installs a prefix on AccessTools.GetTypesFromAssembly that silently handles
+        // ReflectionTypeLoadException instead of logging it. Must be called before any
+        // other harmony.Patch() to suppress the per-patch UnityEngine.CoreModule warning.
+        private static void SuppressHarmonyAssemblyScanWarnings(HarmonyLib.Harmony harmony)
+        {
+            try
+            {
+                var m = typeof(HarmonyLib.AccessTools).GetMethod("GetTypesFromAssembly",
+                    BindingFlags.Static | BindingFlags.Public,
+                    null, new[] { typeof(Assembly) }, null);
+                if (m == null) return;
+                harmony.Patch(m, prefix: new HarmonyMethod(typeof(HeadlessPatches), nameof(AccessTools_GetTypesFromAssembly_Prefix)));
+            }
+            catch { }
+        }
+
+        // Replaces AccessTools.GetTypesFromAssembly entirely: returns partial type list on
+        // ReflectionTypeLoadException without emitting any log message.
+        private static bool AccessTools_GetTypesFromAssembly_Prefix(Assembly assembly, ref IEnumerable<Type> __result)
+        {
+            try { __result = assembly.GetTypes(); }
+            catch (System.Reflection.ReflectionTypeLoadException ex)
+            { __result = System.Linq.Enumerable.Where(ex.Types, t => t != null); }
+            return false;
         }
 
         // ── TryPatch helper ───────────────────────────────────────────────────────────
