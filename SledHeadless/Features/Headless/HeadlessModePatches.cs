@@ -1465,16 +1465,55 @@ namespace SledHeadless
 
             yield return new WaitForSecondsRealtime(0.5f);
 
+            // Resolve the EOS relay region dynamically instead of passing empty (which leaves the
+            // lobby's REGION attribute unset). The game caches its ping-selected region in
+            // PlayerSavedSettings.PlayerRegion, populated by InitialiseRegion() (Unity Relay
+            // ListRegions + QoS ping, 10s lookup timeout). On a normal client this runs during
+            // boot; on headless that path may not have fired, so we trigger it ourselves and poll
+            // PlayerRegion until it resolves. "default" is the game's sentinel for "not resolved".
+            string region = RegionHandler.DefaultRegion; // "default" — the client's own fallback
+            var regionSettings = Il2Cpp.PlayerPrefsManager.Instance?.playerSavedSettings;
+            if (regionSettings != null)
+            {
+                try { region = regionSettings.PlayerRegion ?? region; } catch { }
+
+                bool RegionResolved() =>
+                    !string.IsNullOrWhiteSpace(region) &&
+                    !string.Equals(region, RegionHandler.DefaultRegion, StringComparison.OrdinalIgnoreCase);
+
+                if (!RegionResolved())
+                {
+                    MelonLogger.Msg("[HeadlessMode] Region unresolved — running InitialiseRegion() (Unity Relay + QoS ping)...");
+                    try { regionSettings.InitialiseRegion(); }
+                    catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] InitialiseRegion threw: {ex.GetType().Name}: {ex.Message}"); }
+
+                    float regionWait = Time.realtimeSinceStartup;
+                    while (Time.realtimeSinceStartup - regionWait < 12f)
+                    {
+                        try { region = regionSettings.PlayerRegion ?? region; } catch { }
+                        if (RegionResolved()) break;
+                        yield return new WaitForSecondsRealtime(0.5f);
+                    }
+                }
+
+                if (RegionResolved())
+                    MelonLogger.Msg($"[HeadlessMode] Resolved lobby region: '{region}'.");
+                else
+                    MelonLogger.Warning($"[HeadlessMode] Region did not resolve (last='{region}') — using '{RegionHandler.DefaultRegion}'.");
+            }
+            else
+                MelonLogger.Warning($"[HeadlessMode] PlayerSavedSettings null — cannot resolve region; using '{region}'.");
+
             string lobbyName = !string.IsNullOrWhiteSpace(SledHeadlessCore.ServerName)
                 ? SledHeadlessCore.ServerName : "Headless Server";
 
-            MelonLogger.Msg($"[HeadlessMode] Calling LobbyManager.CreateLobby('{lobbyName}', {SledHeadlessCore.ServerCapacity})...");
+            MelonLogger.Msg($"[HeadlessMode] Calling LobbyManager.CreateLobby('{lobbyName}', {SledHeadlessCore.ServerCapacity}, region='{region}')...");
             try
             {
                 LobbyManager.Instance.CreateLobby(lobbyName, SledHeadlessCore.ServerCapacity,
                     SledHeadlessCore.IsPublicLobby, true, SledHeadlessCore.IsPasswordProtected,
                     SledHeadlessCore.LobbyPassword, SledHeadlessCore.IsPeacefulMode,
-                    "PC", string.Empty, false);
+                    "PC", region, false);
             }
             catch (Exception ex)
             {
