@@ -47,7 +47,7 @@ namespace SledHeadless
         /// </summary>
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
-            MelonLogger.Msg("[HeadlessMode] v43 Applying headless suppression patches...");
+            MelonLogger.Msg("[HeadlessMode] v65 Applying headless suppression patches...");
 
             // Silence Harmony's per-patch "WARNING AccessTools.GetTypesFromAssembly" spam.
             // Every harmony.Patch() call internally scans assemblies; UnityEngine.CoreModule
@@ -124,8 +124,98 @@ namespace SledHeadless
                 prefix: nameof(Sled_FollowOwnerWhileInactive_Prefix),
                 label: "Sled.FollowOwnerWhileInactive null-owner guard");
 
+            // PlayerControl.IsPeaceful is a computed readonly property backed by the
+            // sync_PeacefulModeTurnedOn SyncVar. Patching the getter covers the server-side
+            // RPC processing path, but clients already have the SyncVar value synced from the
+            // server's player prefab default (which may be true). We patch OnSpawnServer to
+            // set sync_PeacefulModeTurnedOn.Value on every player spawn so clients receive the
+            // correct value. The getter patch is kept as belt-and-suspenders for server-side code.
+            TryPatch(harmony,
+                typeNames: new[] { "Il2Cpp.PlayerControl" },
+                methodName: "get_IsPeaceful",
+                prefix: nameof(PlayerControl_IsPeaceful_Prefix),
+                label: "PlayerControl.IsPeaceful → headless peaceful mode preference");
+
+            // ── CHAT FIX: server-side connection→player resolution ─────────────────────────────
+            // PlayerReferenceManager.TryGetPlayer(connectionId, out) — used by the server to attribute an
+            // incoming chat broadcast (OnServerReceivedChatBroadcastFromClient) and by EVERY *.Server_Interact
+            // to identify the acting player — reads the _playerConnectionIdToPlayerReference dictionary. That
+            // dictionary is normally built by OnPlayerReferenceAdded, wired to the SyncList ONLY in client-side
+            // PlayerReferenceManager.OnStartClient (never runs on a headless/server-only host), and it NREs here
+            // anyway (its tail touches EOS/host-only objects). So the dict stays empty, TryGetPlayer(connId)
+            // returns false, and the server silently drops chat re-broadcasts + ignores world interactions —
+            // even though sync_PlayerReferences (the SyncList) is fully populated.
+            //
+            // Fix: after each Server_AddPlayerReference, write the new reference straight into the lookup
+            // dictionaries (the same writes OnPlayerReferenceAdded does, minus its EOS/host-only tail). The
+            // native TryGetPlayer then reads them via plain native field access — no managed marshaling. We do
+            // NOT patch TryGetPlayer itself: a Harmony postfix on its (int, out PlayerReference&) signature
+            // NREs ~per frame inside Il2CppInterop's native→managed trampoline for the by-ref reference param.
+            TryPatch(harmony,
+                typeNames: new[] { "Il2Cpp.PlayerReferenceManager" },
+                methodName: "Server_AddPlayerReference",
+                postfix: nameof(PlayerReferenceManager_Server_AddPlayerReference_Postfix),
+                label: "PlayerReferenceManager.Server_AddPlayerReference → populate connectionId lookup dicts (headless)");
+
+            // Fix (race start disconnect): RaceManager.InitialiseRace calls
+            // PlayerReferenceManager.GetAllConnectionIdsNearPosition, which walks sync_PlayerReferences
+            // and dereferences each reference's PlayerControl.transform.position WITHOUT a null guard.
+            // On headless the host reference (connId 32767) is registered with a null PlayerControl
+            // (the server has no avatar), so the native loop NREs. A ServerRpc reader that throws makes
+            // FishNet kick the sending client — so any client starting a race gets disconnected.
+            // Reimplement the method null-safely in managed code (skip references with a null PlayerControl).
+            TryPatch(harmony,
+                typeNames: new[] { "Il2Cpp.PlayerReferenceManager" },
+                methodName: "GetAllConnectionIdsNearPosition",
+                prefix: nameof(PlayerReferenceManager_GetAllConnectionIdsNearPosition_Prefix),
+                label: "PlayerReferenceManager.GetAllConnectionIdsNearPosition → null-safe reimpl (headless race-start fix)");
+
+            // Fix (fishing disconnect): casting a line sets the rod's sync_IsCasted SyncVar, whose
+            // OnChange handler FishingRod.CheckCastLineOnAllPlayers calls the static
+            // SoundEffectManager.PlayClipAtPoint. On a headless server SoundEffectManager.Instance is null
+            // (the manager comes from a persistent-managers prefab that the headless boot never instantiates
+            // — confirmed live: zero SoundEffectManager components in the scene), and PlayClipAtPoint
+            // dereferences Instance, so it NREs — inside the Cmd_CastLine / Cmd_ReelInLine ServerRpc reader,
+            // so FishNet kicks the casting client (confirmed v62 stack: SyncVar.set_Value →
+            // CheckCastLineOnAllPlayers → SoundEffectManager.PlayClipAtPoint → NRE).
+            // Two complementary fixes: (1) the SoundEffectManager.PlayClipAtPoint no-op registered below
+            // (the server has no audio, so skipping is correct and covers every positional-sound call); and
+            // (2) a silent SoundEffectManager.Instance stub created at boot (EnsureSoundEffectManagerInstance)
+            // so OnChange handlers that read Instance.<clip> BEFORE calling PlayClipAtPoint (e.g. the statue
+            // system — see below) don't NRE on the null Instance itself. We keep a finalizer on the fishing
+            // RpcReaders as a logged safety net so any *other* null in the fishing path is swallowed (logged,
+            // not silently) rather than disconnecting the client while we iterate.
+            TryPatchFinalizeByPrefix(harmony,
+                typeNames: new[] { "Il2Cpp.FishingRod" },
+                namePrefix: "RpcReader___",
+                finalizer: nameof(Fishing_RpcReader_Finalizer),
+                label: "FishingRod.RpcReader___* → log/swallow safety net (headless fishing fix)");
+
+            // Real fix for the fishing disconnect (and any positional-sound NRE): the static
+            // SoundEffectManager.PlayClipAtPoint dereferences the (headless-null) SoundEffectManager.Instance.
+            // Skip it entirely in headless — the server renders no audio.
+            TryPatch(harmony,
+                typeNames: new[] { "Il2Cpp.SoundEffectManager", "Il2Cpp_Scripts.SoundEffectManager" },
+                methodName: "PlayClipAtPoint",
+                prefix: nameof(SkipInHeadless),
+                label: "SoundEffectManager.PlayClipAtPoint → skip in headless (null Instance NRE / fishing fix)");
+
+            // ChatManager.OnCanCommunicateOverNetworkChanged fires when the platform privilege
+            // check (Steam/EOS) determines whether network communication is allowed. In headless
+            // without a real Steam session this fires with false, which shuts down all chat.
+            // Force true so chat stays enabled regardless of platform privilege state.
+            TryPatch(harmony,
+                typeNames: new[] { "Il2Cpp_Scripts.Systems.Chat.ChatManager" },
+                methodName: "OnCanCommunicateOverNetworkChanged",
+                prefix: nameof(ChatManager_OnCanCommunicateOverNetworkChanged_Prefix),
+                label: "ChatManager.OnCanCommunicateOverNetworkChanged → force true in headless");
+
             // ── Audio suppression ─────────────────────────────────────────────────────
             // -nographics does NOT suppress audio. Silence the game's audio managers.
+            // Note: on headless the real SoundEffectManager never spawns, so this Awake patch is normally
+            // inert. It matters only for the stub we create in EnsureSoundEffectManagerInstance: keeping
+            // Awake suppressed means the stub never runs the manager's audio setup (we set its Instance
+            // singleton manually instead).
             TryPatch(harmony,
                 typeNames: new[] { "Il2Cpp.SoundEffectManager", "Il2Cpp_Scripts.SoundEffectManager" },
                 methodName: "Awake",
@@ -172,6 +262,7 @@ namespace SledHeadless
             });
 
             MelonCoroutines.Start(SilenceAudio());
+            MelonCoroutines.Start(EnsureSoundEffectManagerInstance());
             MelonCoroutines.Start(EnableHeadlessNetworkManager());
             MelonCoroutines.Start(WaitForEosLoginAndAutoHost());
             MelonLogger.Msg("[HeadlessMode] Done.");
@@ -1435,6 +1526,347 @@ namespace SledHeadless
 
             // Report the live EOS lobby + active transport so we know whether/how a client can join.
             LogHostDiagnostics();
+
+            // Push correct lobby settings to all clients via FishNet SyncVar.
+            FixAndSyncLobbySettings();
+
+            // Enable text and voice chat on the server's PlayerSavedSettings.
+            EnableHeadlessChat();
+
+            // Register the headless host as a PlayerReference in PlayerReferenceManager.
+            // In a normal hosted game, PlayerControl.InitializePlayerReferenceAsync() calls
+            // Cmd_AddPlayerReference to register the host at connection ID 32767. In headless
+            // this never completes (it waits for Steam session ticket / Dissonance voice ID).
+            // Without the host PlayerReference in sync_PlayerReferences, client-side code that
+            // checks for a valid host entry (snowball pickup gate, chat gate, etc.) fails silently.
+            RegisterHostPlayerReference();
+
+            // Register the server-side chat broadcast handler. ChatManager.OnEnable registers its
+            // FishNet broadcast handlers at scene-load time, when IsServer is still false (we start
+            // the server ~37s later, after EOS login), so the server-side handler is never bound.
+            // Result: client chat broadcasts reach ServerManager.ParseBroadcast but are dropped with
+            // no registered handler. We bind it manually now that the server is up.
+            MelonCoroutines.Start(RegisterHeadlessChatServerHandler());
+
+            // Initialize SyncVars on server-side disabled NetworkBehaviours so they can replicate to
+            // clients (fixes snowball pickup and any other state carried by a disabled behaviour's SyncVars).
+            MelonCoroutines.Start(EnsureServerBehavioursInitializedLoop());
+        }
+
+        // Binds ChatManager.OnServerReceivedChatBroadcastFromClient as a FishNet server broadcast
+        // handler for the ChatMessage broadcast type. Confirmed root cause of broken text chat: the
+        // game registers this in ChatManager.OnEnable while IsServer is still false on headless, so
+        // it never binds and incoming chat broadcasts are dropped. requireAuthentication=false so
+        // delivery doesn't depend on FishNet's authenticated-flag (our EOS clients may not carry it).
+        private static IEnumerator RegisterHeadlessChatServerHandler()
+        {
+            if (!Application.isBatchMode) yield break;
+
+            // Wait for the server + ChatManager.Instance to exist.
+            Il2Cpp_Scripts.Systems.Chat.ChatManager cm = null;
+            Il2CppFishNet.Managing.Server.ServerManager sm = null;
+            float start = Time.realtimeSinceStartup;
+            while (Time.realtimeSinceStartup - start < 30f && !_isQuitting)
+            {
+                try
+                {
+                    cm = Il2Cpp_Scripts.Systems.Chat.ChatManager.Instance;
+                    sm = InstanceFinder.ServerManager;
+                }
+                catch { }
+                if (cm != null && sm != null && sm.IsAnyServerStarted()) break;
+                yield return new WaitForSecondsRealtime(0.5f);
+            }
+
+            if (cm == null || sm == null)
+            {
+                MelonLogger.Warning($"[HeadlessMode] Chat handler not registered: ChatManager={(cm != null)}, ServerManager={(sm != null)}.");
+                yield break;
+            }
+
+            try
+            {
+                // Build the Action<NetworkConnection, ChatMessage, Channel> by binding directly to the
+                // EXISTING native ChatManager.OnServerReceivedChatBroadcastFromClient method. A C#
+                // lambda can't be used here: Il2CppInterop can't marshal the non-blittable ChatMessage
+                // struct across a managed trampoline. Il2CppSystem.Delegate.CreateDelegate binds the
+                // native method to a native delegate with no managed marshaling, sidestepping that.
+                var actionType = Il2CppInterop.Runtime.Il2CppType.Of<Il2CppSystem.Action<
+                    Il2CppFishNet.Connection.NetworkConnection,
+                    Il2Cpp_Scripts.Systems.Chat.ChatMessage,
+                    Il2CppFishNet.Transporting.Channel>>();
+
+                var del = Il2CppSystem.Delegate.CreateDelegate(
+                    actionType,
+                    cm.Cast<Il2CppSystem.Object>(),
+                    "OnServerReceivedChatBroadcastFromClient");
+
+                var handler = del.Cast<Il2CppSystem.Action<
+                    Il2CppFishNet.Connection.NetworkConnection,
+                    Il2Cpp_Scripts.Systems.Chat.ChatMessage,
+                    Il2CppFishNet.Transporting.Channel>>();
+
+                sm.RegisterBroadcast<Il2Cpp_Scripts.Systems.Chat.ChatMessage>(handler, false);
+
+                MelonLogger.Msg("[HeadlessMode] Registered server-side chat broadcast handler (ChatMessage).");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[HeadlessMode] RegisterHeadlessChatServerHandler failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // On a headless (server-only) host, NetworkBehaviours that are DISABLED on the server — e.g.
+        // PlayerMovement, which only the owning client simulates — never run their Awake-driven
+        // NetworkInitialize_Early, so their SyncVars stay uninitialized (IsInitialized=False) and CANNOT
+        // replicate to clients. FishNet normally force-initializes such behaviours via
+        // NetworkInitializeIfDisabled(); under this custom (CreateLobby-based) headless start that call is
+        // skipped. The visible symptom is snowball pickup never working for clients:
+        // PlayerMovement.sync_CurrentFootstepCollection never replicates, so the client's
+        // GetIsStandingOnSnow() is always false and the pickup prompt never shows. We replicate FishNet's
+        // own call here. Verified live (RuntimeAPI /eval): NetworkInitializeIfDisabled() flips footstep
+        // init False→True, the value then replicates, and YoureAllowedTo_PickupSnow() becomes true on the
+        // client. The call is a guarded no-op once a behaviour is initialized, so re-running is safe; we
+        // poll so players who join later are covered too.
+        private static IEnumerator EnsureServerBehavioursInitializedLoop()
+        {
+            if (!Application.isBatchMode) yield break;
+            while (!_isQuitting)
+            {
+                yield return new WaitForSecondsRealtime(2f);
+                try { InitializeDisabledServerBehaviours(); }
+                catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode][NETINIT] loop error: {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
+
+        private static void InitializeDisabledServerBehaviours()
+        {
+            var pcs = Resources.FindObjectsOfTypeAll<Il2Cpp.PlayerControl>();
+            if (pcs == null) return;
+            foreach (var pc in pcs)
+            {
+                try
+                {
+                    if (pc == null || !pc.IsSpawned) continue;
+
+                    // Only act when a player still has an uninitialized SyncVar (the symptom), to keep the poll cheap.
+                    var mv = pc.movement;
+                    if (mv == null) continue;
+                    var foot = mv.sync_CurrentFootstepCollection;
+                    if (foot == null || foot.IsInitialized) continue;
+
+                    var nob = pc.NetworkObject;
+                    if (nob == null) continue;
+                    var nbs = nob.NetworkBehaviours;
+                    if (nbs == null) continue;
+
+                    int n = nbs.Count;
+                    for (int i = 0; i < n; i++)
+                    {
+                        try { nbs[i].NetworkInitializeIfDisabled(); } catch { }
+                    }
+                    MelonLogger.Msg($"[HeadlessMode][NETINIT] Initialized {n} disabled NetworkBehaviours for player owner={pc.OwnerId} — SyncVars (footstep/snow, etc.) can now replicate.");
+                }
+                catch { }
+            }
+        }
+
+        // Registers the headless server as the host PlayerReference (connection ID 32767) in
+        // PlayerReferenceManager.sync_PlayerReferences. Normally PlayerControl.InitializePlayerReferenceAsync
+        // calls Cmd_AddPlayerReference from the host's client side, but in headless that async
+        // method never completes. Without this entry, client-side checks for a valid host
+        // PlayerReference block snowball pickup, chat, and other gameplay features.
+        private static void RegisterHostPlayerReference()
+        {
+            try
+            {
+                var prm = Il2Cpp.PlayerReferenceManager.Instance;
+                if (prm == null) { MelonLogger.Warning("[HeadlessMode] PlayerReferenceManager.Instance is null — host PlayerReference not registered."); return; }
+
+                // Connection ID 32767 is FishNet's host/server-as-client connection ID.
+                const int HostConnectionId = 32767;
+
+                // Check if already registered (shouldn't be, but guard against double-call).
+                Il2Cpp.PlayerReference existing = null;
+                bool alreadyExists = prm.TryGetPlayer(HostConnectionId, out existing);
+                if (alreadyExists) { MelonLogger.Msg("[HeadlessMode] Host PlayerReference already registered — skipping."); return; }
+
+                string puid = "";
+                try { puid = EOSManager.Instance?.GetProductUserId()?.ToString() ?? ""; } catch { }
+
+                string username = !string.IsNullOrWhiteSpace(SledHeadlessCore.ServerName)
+                    ? SledHeadlessCore.ServerName : "HeadlessServer";
+
+                // Pass null for PlayerControl — a headless server has no physical player body.
+                // Linking a PlayerControl here would attach the server's phantom "Player Networked"
+                // object to connection 32767, causing its nametag to appear overlaid on client 1
+                // (they share the same spawn point). The PlayerReference is metadata only.
+                long platformId = (long)FakeSteamId;
+
+                prm.Server_AddPlayerReference(puid, platformId, HostConnectionId, username,
+                    "" /* voiceId — no Dissonance in headless */, AuthPlatform.Steam, null);
+
+                MelonLogger.Msg($"[HeadlessMode] Registered host PlayerReference:" +
+                    $" connId={HostConnectionId}, puid={puid}, name={username}, platformId={platformId}");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[HeadlessMode] RegisterHostPlayerReference: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // Writes the just-added PlayerReference into PlayerReferenceManager's lookup dictionaries, which the
+        // native TryGetPlayer / *.Server_Interact paths read by plain native field access. These dicts are
+        // directly reachable through Il2CppInterop (verified live via the RuntimeAPI /eval endpoint), so we
+        // mirror exactly the writes OnPlayerReferenceAdded performs, minus its EOS/host-only tail that NREs on
+        // a headless host. This is the whole chat fix: once _playerConnectionIdToPlayerReference[connId] is set,
+        // OnServerReceivedChatBroadcastFromClient resolves the sender and re-broadcasts normally.
+        private static void PlayerReferenceManager_Server_AddPlayerReference_Postfix(Il2Cpp.PlayerReferenceManager __instance)
+        {
+            if (!Application.isBatchMode || _isQuitting || __instance == null) return;
+            try
+            {
+                var list = __instance.GetPlayerReferences();
+                if (list == null || list.Count == 0) return;
+                var r = list[list.Count - 1];
+                if (r == null) return;
+
+                int connId = r.ConnectionID;
+
+                var connDict = __instance._playerConnectionIdToPlayerReference;
+                if (connDict != null) connDict[connId] = r;
+
+                try { var pidDict = __instance._playerPlatformIdToPlayerReference; if (pidDict != null && !string.IsNullOrEmpty(r.ProductUserId)) pidDict[r.ProductUserId] = r; } catch { }
+                try { var puidDict = __instance._playerPlatformUserIdToPlayerReference; if (puidDict != null && r.PlatformUserId > 0) puidDict[r.PlatformUserId] = r; } catch { }
+
+                MelonLogger.Msg($"[HeadlessMode][PRM] Populated lookup dicts for connId={connId} user='{r.Username}' (connDict={(connDict == null ? -1 : connDict.Count)}, refs={list.Count}).");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[HeadlessMode][PRM] Server_AddPlayerReference postfix: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // Null-safe reimplementation of PlayerReferenceManager.GetAllConnectionIdsNearPosition.
+        // The native method dereferences each PlayerReference.PlayerControl.transform.position
+        // without guarding against a null PlayerControl. The headless host reference (connId 32767)
+        // has a null PlayerControl, so the native loop NREs — and because this runs inside the
+        // Cmd_InitialiseRace ServerRpc reader, FishNet kicks the client that started the race.
+        // We replace the body entirely (return false) on headless, skipping null-PlayerControl refs.
+        private static bool PlayerReferenceManager_GetAllConnectionIdsNearPosition_Prefix(
+            Il2Cpp.PlayerReferenceManager __instance,
+            UnityEngine.Vector3 position,
+            float radius,
+            ref Il2CppSystem.Collections.Generic.List<int> __result)
+        {
+            if (!Application.isBatchMode || _isQuitting) return true; // run native on non-headless
+
+            var result = new Il2CppSystem.Collections.Generic.List<int>();
+            try
+            {
+                var list = __instance?.GetPlayerReferences();
+                if (list != null)
+                {
+                    int n = list.Count;
+                    for (int i = 0; i < n; i++)
+                    {
+                        try
+                        {
+                            var pr = list[i];
+                            if (pr == null) continue;
+                            var pc = pr.PlayerControl;
+                            if (pc == null) continue;           // headless host (32767) has no avatar — skip
+                            var tr = pc.transform;
+                            if (tr == null) continue;
+                            var p = tr.position;
+                            float dx = p.x - position.x;
+                            float dy = p.y - position.y;
+                            float dz = p.z - position.z;
+                            if (Mathf.Sqrt(dx * dx + dy * dy + dz * dz) <= radius)
+                                result.Add(pr.ConnectionID);
+                        }
+                        catch { /* one bad reference must not abort the whole scan */ }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[HeadlessMode][RACE] GetAllConnectionIdsNearPosition reimpl error: {ex.GetType().Name}: {ex.Message}");
+            }
+
+            __result = result;
+            return false; // skip the unguarded native method
+        }
+
+        // Enables text and voice chat on the server's PlayerSavedSettings so the server-side
+        // ChatManager processes and forwards messages from clients. Also calls YesNo_TextChat /
+        // YesNo_VoiceChat on UiReferenceController which is the same code path the normal UI uses.
+        private static void EnableHeadlessChat()
+        {
+            // Set on PlayerPrefsManager.playerSavedSettings (the persistent save data layer)
+            try
+            {
+                var savedSettings = Il2Cpp.PlayerPrefsManager.Instance?.playerSavedSettings;
+                if (savedSettings != null)
+                {
+                    savedSettings.TextChatEnabledGeneral = true;
+                    savedSettings.VoiceChatEnabledGeneral = true;
+                    MelonLogger.Msg("[HeadlessMode] Enabled text + voice chat on PlayerSavedSettings.");
+                }
+                else
+                    MelonLogger.Warning("[HeadlessMode] PlayerPrefsManager.playerSavedSettings is null — chat defaults unchanged.");
+            }
+            catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] EnableHeadlessChat (saved settings): {ex.Message}"); }
+
+            // Also drive through the official UI codepath that normally fires when the host
+            // clicks "Yes" in the setup dialog — UiReferenceController.YesNo_TextChat/VoiceChat.
+            try
+            {
+                var uiRef = Il2Cpp.UiReferenceController.Instance;
+                if (uiRef != null)
+                {
+                    uiRef.YesNo_TextChat(true);
+                    uiRef.YesNo_VoiceChat(true);
+                    MelonLogger.Msg("[HeadlessMode] Called YesNo_TextChat(true) + YesNo_VoiceChat(true).");
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] EnableHeadlessChat (YesNo): {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Reads the current <c>LobbySettings</c> from <c>LobbySettingsManager</c>, overwrites the
+        /// fields that default to wrong values in headless (peaceful mode, chat mode), then pushes
+        /// the corrected struct to all connected clients via <c>Server_UpdateLobbySettings</c>.
+        ///
+        /// Why this is necessary: <c>CreateLobby</c> stores peaceful mode / chat settings as EOS
+        /// lobby attributes (visible in the lobby browser) but the in-game behaviour is driven by
+        /// a FishNet-synced <c>LobbySettings</c> struct managed by <c>LobbySettingsManager</c>.
+        /// In the normal hosted flow the UI calls <c>Server_UpdateLobbySettings</c> to sync the
+        /// struct after the host clicks "Create". We bypass that UI, so without this call clients
+        /// receive the struct's default value — which leaves <c>peacefulModeOn = true</c> (blocking
+        /// snowball pickup) and <c>textChatOnly = false</c> may be misinterpreted if other fields
+        /// are zeroed.
+        /// </summary>
+        private static void FixAndSyncLobbySettings()
+        {
+            try
+            {
+                var lsm = Il2Cpp.LobbySettingsManager.Instance;
+                if (lsm == null) { MelonLogger.Warning("[HeadlessMode] LobbySettingsManager.Instance is null — skipping lobby settings fix."); return; }
+
+                var settings = lsm.GetLobbySettings();
+                MelonLogger.Msg($"[HeadlessMode] LobbySettings before fix: peaceful={settings.peacefulModeOn}, textChatOnly={settings.textChatOnly}");
+
+                settings.peacefulModeOn = SledHeadlessCore.IsPeacefulMode;
+                settings.textChatOnly   = false; // allow both voice and text chat
+
+                lsm.Server_UpdateLobbySettings(settings);
+                MelonLogger.Msg($"[HeadlessMode] LobbySettings fixed: peaceful={settings.peacefulModeOn}, textChatOnly={settings.textChatOnly}");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[HeadlessMode] FixAndSyncLobbySettings: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -1554,6 +1986,114 @@ namespace SledHeadless
             }
         }
 
+        /// <summary>
+        /// Coroutine: ensure <c>SoundEffectManager.Instance</c> is non-null on the headless server.
+        ///
+        /// On a normal (client-host) game the SoundEffectManager is part of a persistent-managers prefab
+        /// instantiated in the main-menu flow; the headless boot skips that flow, so the manager is never
+        /// created and its static <c>Instance</c> stays null (confirmed live: zero SoundEffectManager
+        /// components in the scene). That null is the root cause of two client-facing bugs:
+        ///   • Fishing: FishingRod.CheckCastLineOnAllPlayers → SoundEffectManager.PlayClipAtPoint derefs
+        ///     the null Instance inside a ServerRpc reader → FishNet kicks the caster.
+        ///   • Statues: StatueUnlockSystem.OnTargetsHitChanged (the _targetsHit SyncVar OnChange) reads
+        ///     <c>SoundEffectManager.Instance.statueTargetPracticeHitSound</c> to feed PlayClipAtPoint.
+        ///     The deref of the null Instance throws, aborting the OnChange — so the server never runs the
+        ///     statue's completion logic and the statue's interactable never activates (the snowball targets
+        ///     still react, because that visual is a separate server→client TargetRpc).
+        ///
+        /// PlayClipAtPoint is also no-op'd in headless (see ApplyPatches), so the stub's null SoundEffectSO
+        /// fields are never dereferenced — every read of them feeds the skipped PlayClipAtPoint. Combined,
+        /// the manager exists (Instance non-null, OnChange handlers complete) but produces no audio.
+        /// Verified live via /eval: with the stub present, completing all targets sets HasCompletedAllTargets
+        /// and IsInteractableEnabled true with no NRE.
+        /// </summary>
+        private static IEnumerator EnsureSoundEffectManagerInstance()
+        {
+            yield return null;
+            if (!Application.isBatchMode) yield break;
+
+            for (int attempt = 0; attempt < 20 && !_isQuitting; attempt++)
+            {
+                bool done = false;
+                try
+                {
+                    // If the real manager ever shows up, leave it alone.
+                    if (SoundEffectManager.Instance != null)
+                        yield break;
+
+                    var go = new GameObject("HeadlessSoundEffectManager");
+                    Object.DontDestroyOnLoad(go);
+                    var comp = go.AddComponent<SoundEffectManager>();
+
+                    // SoundEffectManager.Awake (which normally does `Instance = this`) is suppressed in
+                    // headless, so assign the singleton ourselves. The stub's serialized clip/audio-source
+                    // fields stay null — harmless, because PlayClipAtPoint is no-op'd in headless.
+                    if (SoundEffectManager.Instance == null)
+                        SetSoundEffectManagerInstance(comp);
+
+                    if (SoundEffectManager.Instance != null)
+                    {
+                        MelonLogger.Msg("[HeadlessMode] Created silent SoundEffectManager stub " +
+                                        "(Instance was null; needed by statue/fishing positional-sound OnChange handlers).");
+                        done = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MelonLogger.Warning($"[HeadlessMode] SoundEffectManager stub attempt {attempt} failed: {ex.GetType().Name}: {ex.Message}");
+                }
+
+                if (done) yield break;
+                yield return new WaitForSeconds(1f);
+            }
+        }
+
+        /// <summary>
+        /// Assigns the <c>SoundEffectManager.Instance</c> singleton via reflection. The Il2CppInterop
+        /// property setter writes the native static backing field; a direct managed assignment may not be
+        /// accessible depending on the generated accessibility, so we go through reflection (with a backing
+        /// field fallback) — both proven to write native memory correctly.
+        /// </summary>
+        private static void SetSoundEffectManagerInstance(SoundEffectManager comp)
+        {
+            var t = typeof(SoundEffectManager);
+            var prop = t.GetProperty("Instance",
+                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+            if (prop != null && prop.CanWrite)
+            {
+                prop.SetValue(null, comp);
+                return;
+            }
+            var field = t.GetField("_003CInstance_003Ek__BackingField",
+                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+            if (field != null)
+                field.SetValue(null, comp);
+        }
+
+        // ── Peaceful mode + chat fixes ────────────────────────────────────────────────
+
+        // Prefix for PlayerControl.get_IsPeaceful. In headless there is no host player character,
+        // so sync_PeacefulModeTurnedOn is never written and may default to true in the prefab.
+        // Return the preference directly so all client ServerRpcs (Cmd_StartPickingUpSnow etc.)
+        // see the correct peaceful mode without needing a live host PlayerControl.
+        private static bool PlayerControl_IsPeaceful_Prefix(ref bool __result)
+        {
+            if (!Application.isBatchMode || _isQuitting) return true;
+            __result = SledHeadlessCore.IsPeacefulMode;
+            return false;
+        }
+
+        // Prefix for ChatManager.OnCanCommunicateOverNetworkChanged. Forces the argument to true
+        // so the ChatManager always considers network communication available. In headless without
+        // a real Steam/EOS session this is called with false, which disables all network chat.
+        private static bool ChatManager_OnCanCommunicateOverNetworkChanged_Prefix(ref bool canCommunicateOverNetwork)
+        {
+            if (!Application.isBatchMode || _isQuitting) return true;
+            MelonLogger.Msg($"[HeadlessMode] ChatManager.OnCanCommunicateOverNetworkChanged({canCommunicateOverNetwork}) → forcing true");
+            canCommunicateOverNetwork = true;
+            return true; // run original with forced-true argument
+        }
+
         // ── FishNet crash guards ──────────────────────────────────────────────────────
 
         /// <summary>
@@ -1657,6 +2197,52 @@ namespace SledHeadless
                 MelonLogger.Msg($"[HeadlessMode] Patched '{label ?? $"{targetType.Name}.{methodName}"}'.");
             }
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] Failed to patch '{label ?? methodName}': {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Patches every method on the resolved type whose name starts with <paramref name="namePrefix"/>
+        /// with the named finalizer. Used to attach one finalizer to all of a NetworkBehaviour's generated
+        /// RpcReader___ methods at once — their hashed names (e.g. RpcReader___Cmd_CastLine___2166136261)
+        /// can't be matched individually by AccessTools.Method.
+        /// </summary>
+        private static void TryPatchFinalizeByPrefix(HarmonyLib.Harmony harmony, string[] typeNames,
+            string namePrefix, string finalizer, string prefix = null, string label = null)
+        {
+            Type targetType = null;
+            foreach (var name in typeNames) { targetType = AccessTools.TypeByName(name); if (targetType != null) break; }
+            if (targetType == null) { MelonLogger.Warning($"[HeadlessMode] Type not found for '{label ?? namePrefix}'."); return; }
+
+            var finalizerM = finalizer != null ? new HarmonyMethod(typeof(HeadlessPatches), finalizer) : null;
+            var prefixM = prefix != null ? new HarmonyMethod(typeof(HeadlessPatches), prefix) : null;
+            int count = 0;
+            foreach (var m in targetType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+            {
+                if (m.Name == null || !m.Name.StartsWith(namePrefix, StringComparison.Ordinal)) continue;
+                try { harmony.Patch(m, prefix: prefixM, finalizer: finalizerM); count++; }
+                catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] Failed to patch '{m.Name}': {ex.Message}"); }
+            }
+            MelonLogger.Msg($"[HeadlessMode] Patched {count} method(s) for '{label ?? $"{targetType.Name}.{namePrefix}*"}'.");
+        }
+
+        // Safety net for fishing server-side RPC readers. If a reader throws (e.g. some other null in the
+        // fishing path beyond the SoundEffectManager.PlayClipAtPoint no-op), log the throwing method +
+        // instance state and return null to swallow it — a throw inside a FishNet ServerRpc reader
+        // otherwise makes FishNet kick the sending client.
+        private static Exception Fishing_RpcReader_Finalizer(Exception __exception, MethodBase __originalMethod, Il2Cpp.FishingRod __instance)
+        {
+            if (!Application.isBatchMode) return __exception;
+            if (__exception != null)
+            {
+                int nobId = -1; string scState = "?";
+                try { if (__instance != null) { nobId = __instance.NetworkObject == null ? -1 : __instance.NetworkObject.ObjectId; var sc = __instance.sync_IsCasted; scState = sc == null ? "NULL" : "init=" + sc.IsInitialized; } } catch { }
+                MelonLogger.Warning($"[HeadlessMode][FISH] {__originalMethod?.DeclaringType?.Name}.{__originalMethod?.Name} threw (rod nob={nobId} sync_IsCasted={scState}): {__exception.GetType().Name}: {__exception.Message}");
+                if (!string.IsNullOrEmpty(__exception.StackTrace))
+                    MelonLogger.Warning($"[HeadlessMode][FISH] Stack: {__exception.StackTrace}");
+                var inner = __exception.InnerException;
+                if (inner != null)
+                    MelonLogger.Warning($"[HeadlessMode][FISH] Inner: {inner.GetType().Name}: {inner.Message}\n{inner.StackTrace}");
+            }
+            return null; // swallow so FishNet does not kick the client
         }
     }
 }
