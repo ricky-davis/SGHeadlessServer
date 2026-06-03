@@ -41,6 +41,8 @@ namespace SledHeadless
 
             if (Application.isBatchMode)
                 HeadlessPatches.ApplyPatches(HarmonyInstance);
+            else
+                ClientSpawnDiagnostics.Install(HarmonyInstance);
         }
 
         public override void OnApplicationQuit()

@@ -623,6 +623,7 @@
 	<ItemGroup>
 		<Compile Include="SledHeadlessCore.cs" />
 		<Compile Include="Features/Headless/HeadlessModePatches.cs" />
+		<Compile Include="Features/Diagnostics/ClientSpawnDiagnostics.cs" />
 		<Compile Include="$(IntermediateOutputPath)GeneratedMelonInfo.cs" />
 	</ItemGroup>
 

@@ -47,7 +47,7 @@ namespace SledHeadless
         /// </summary>
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
-            MelonLogger.Msg("[HeadlessMode] v65 Applying headless suppression patches...");
+            MelonLogger.Msg("[HeadlessMode] v72 Applying headless suppression patches...");
 
             // Silence Harmony's per-patch "WARNING AccessTools.GetTypesFromAssembly" spam.
             // Every harmony.Patch() call internally scans assemblies; UnityEngine.CoreModule
@@ -1590,6 +1590,18 @@ namespace SledHeadless
             // Initialize SyncVars on server-side disabled NetworkBehaviours so they can replicate to
             // clients (fixes snowball pickup and any other state carried by a disabled behaviour's SyncVars).
             MelonCoroutines.Start(EnsureServerBehavioursInitializedLoop());
+
+            // Enable PlayerMovement FAST (250ms poll) so its footstep SyncVar replicates before the owner's
+            // first CmdSetFootstepCollection — required for the snowball-pickup prompt. See the loop comment.
+            MelonCoroutines.Start(EnsurePlayerMovementEnabledLoop());
+
+            // Hide the headless host's phantom "Player Networked" object from remote clients so it is
+            // never serialized into their spawn batch (it is uninitialized — no real avatar — and its
+            // spawn-time callback NREs on the client, desyncing FishNet's PooledReader and aborting the
+            // whole spawn packet → the client's own Sled never spawns → stuck on "Waiting for
+            // Sled.LocalSledInstance"). MelonLoader clients survive because Il2CppInterop swallows the
+            // callback NRE; vanilla clients have no such net, so only they hang. See HidePhantomHostPlayerLoop.
+            MelonCoroutines.Start(HidePhantomHostPlayerLoop());
         }
 
         // Binds ChatManager.OnServerReceivedChatBroadcastFromClient as a FishNet server broadcast
@@ -1678,6 +1690,107 @@ namespace SledHeadless
             }
         }
 
+        // Player NetworkObjects whose footstep value we have already force-re-sent to clients.
+        private static readonly HashSet<int> _footstepResentNobs = new();
+
+        // The headless server keeps each player's PlayerMovement DISABLED (only the owning client
+        // simulates it). A DISABLED NetworkBehaviour's SyncVars are excluded from FishNet's per-observer
+        // delta sync, so PlayerMovement.sync_CurrentFootstepCollection (ServerOnly-write, set by the owner
+        // via CmdSetFootstepCollection, read by GetIsStandingOnSnow) never reaches clients → the snowball
+        // pickup prompt never appears. We must do TWO things:
+        //   1. ENABLE PlayerMovement so FishNet will replicate its SyncVars at all.
+        //   2. DELIVER the current footstep value. Enabling alone is not enough: the footstep changes
+        //      None→Snow exactly once (owner first steps on snow); if that transition happened while the
+        //      behaviour was disabled the delta is lost, and afterwards the owner keeps sending the SAME
+        //      value (no change → no delta). A SAME-FRAME re-set (Snow→None→Snow in one tick) is COALESCED
+        //      by FishNet into no net change and sends nothing. Trying to "catch" the natural transition by
+        //      enabling early was too timing-dependent and failed in practice. The ONLY reliable delivery is
+        //      a CROSS-TICK transition: set None, let a tick pass so FishNet actually transmits None, then
+        //      restore the real value → a genuine None→Snow delta that reaches every client. Verified live.
+        // Movement stays owner-authoritative (the server is not the owner), so this only restores SyncVar
+        // replication; it does not let the server drive movement. (NOTE: SyncBase.IsDirty is a red herring —
+        // every SyncVar reads dirty=True here, including enabled ones that clearly replicate.)
+        private static IEnumerator EnsurePlayerMovementEnabledLoop()
+        {
+            if (!Application.isBatchMode) yield break;
+            var resendQueue = new List<Il2Cpp.PlayerMovement>();
+            while (!_isQuitting)
+            {
+                yield return new WaitForSecondsRealtime(0.5f);
+
+                // Pass 1 (no yields): enable PlayerMovement everywhere, and queue any player whose footstep
+                // now holds a real (non-None) value that we have not yet force-re-sent.
+                resendQueue.Clear();
+                var spawnedNobIds = new HashSet<int>();
+                try
+                {
+                    var pcs = Resources.FindObjectsOfTypeAll<Il2Cpp.PlayerControl>();
+                    if (pcs != null)
+                    {
+                        foreach (var pc in pcs)
+                        {
+                            try
+                            {
+                                if (pc == null || !pc.IsSpawned) continue;
+                                var mv = pc.movement;
+                                if (mv == null) continue;
+                                var nob = pc.NetworkObject;
+                                int owner = nob == null ? -1 : nob.OwnerId;
+                                if (owner == 32767 || owner < 0) continue; // skip the host phantom
+
+                                if (!mv.enabled)
+                                {
+                                    mv.enabled = true;
+                                    MelonLogger.Msg($"[HeadlessMode][MVENABLE] Enabled PlayerMovement for owner={owner}.");
+                                }
+
+                                int nobId = nob == null ? 0 : nob.GetInstanceID();
+                                spawnedNobIds.Add(nobId);
+                                if (_footstepResentNobs.Contains(nobId)) continue;
+                                var sv = mv.sync_CurrentFootstepCollection;
+                                if (sv == null || sv.Value == Il2Cpp.FootstepCollectionType.None) continue; // wait for a real surface
+                                resendQueue.Add(mv);
+                            }
+                            catch { }
+                        }
+                    }
+
+                    // Forget players who have LEFT: FishNet pools NetworkObjects, so a rejoining player can
+                    // REUSE the same object (same GetInstanceID). If we kept its id, the re-send would be
+                    // skipped and the rejoiner's footstep would never replicate (until they restart their
+                    // client). Keep only ids still spawned, so a reused-on-rejoin object is treated as fresh
+                    // and re-sent again.
+                    _footstepResentNobs.IntersectWith(spawnedNobIds);
+                }
+                catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode][MVENABLE] scan error: {ex.GetType().Name}: {ex.Message}"); }
+
+                // Pass 2 (yields): cross-tick re-send each queued player so the value is actually delivered.
+                foreach (var mv in resendQueue)
+                {
+                    var sv = mv == null ? null : mv.sync_CurrentFootstepCollection;
+                    if (sv == null) continue;
+                    var cur = sv.Value;
+                    if (cur == Il2Cpp.FootstepCollectionType.None) continue;
+
+                    bool setNone = false;
+                    try { sv.Value = Il2Cpp.FootstepCollectionType.None; setNone = true; } catch { }
+                    if (!setNone) continue;
+
+                    yield return new WaitForSecondsRealtime(0.2f); // let FishNet transmit None on its own tick
+
+                    try
+                    {
+                        // Restore the real value (unless the owner already pushed a new one meanwhile).
+                        if (sv.Value == Il2Cpp.FootstepCollectionType.None) sv.Value = cur;
+                        var nob = mv.NetworkObject;
+                        if (nob != null) _footstepResentNobs.Add(nob.GetInstanceID());
+                        MelonLogger.Msg($"[HeadlessMode][MVENABLE] Cross-tick re-sent footstep={cur} for owner={(nob == null ? -1 : nob.OwnerId)} — clients can now see it (snowball pickup).");
+                    }
+                    catch { }
+                }
+            }
+        }
+
         private static void InitializeDisabledServerBehaviours()
         {
             var pcs = Resources.FindObjectsOfTypeAll<Il2Cpp.PlayerControl>();
@@ -1688,9 +1801,12 @@ namespace SledHeadless
                 {
                     if (pc == null || !pc.IsSpawned) continue;
 
-                    // Only act when a player still has an uninitialized SyncVar (the symptom), to keep the poll cheap.
                     var mv = pc.movement;
                     if (mv == null) continue;
+
+                    // Only run the (cheap) NETINIT pass while a SyncVar is still uninitialized.
+                    // (PlayerMovement is enabled separately and FAST in EnsurePlayerMovementEnabledLoop so
+                    // its footstep SyncVar replicates in time — see that loop for the full explanation.)
                     var foot = mv.sync_CurrentFootstepCollection;
                     if (foot == null || foot.IsInitialized) continue;
 
@@ -1708,6 +1824,119 @@ namespace SledHeadless
                 }
                 catch { }
             }
+        }
+
+        // Instance IDs of phantom host NetworkObjects we have already made host-only, so the 2s
+        // poll doesn't re-process (and re-log) them every tick.
+        private static readonly HashSet<int> _hostOnlyPhantomNobs = new();
+
+        // Polls for the headless host's phantom "Player Networked" object and makes it host-only
+        // (visible to the server, never serialized to remote clients). Runs on a loop because the
+        // phantom is spawned slightly after the server starts and we want it hidden before any
+        // client joins. Idempotent — each phantom is processed once (see _hostOnlyPhantomNobs).
+        private static IEnumerator HidePhantomHostPlayerLoop()
+        {
+            if (!Application.isBatchMode) yield break;
+            while (!_isQuitting)
+            {
+                yield return new WaitForSecondsRealtime(2f);
+                try { HidePhantomHostPlayersFromClients(); }
+                catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode][HIDE] loop error: {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
+
+        private static void HidePhantomHostPlayersFromClients()
+        {
+            var serverMgr = InstanceFinder.ServerManager;
+            if (serverMgr == null || !serverMgr.Started) return;
+            var serverObjects = serverMgr.Objects;
+            if (serverObjects == null) return;
+
+            var pcs = Resources.FindObjectsOfTypeAll<Il2Cpp.PlayerControl>();
+            if (pcs == null) return;
+            foreach (var pc in pcs)
+            {
+                try
+                {
+                    if (pc == null || !pc.IsSpawned) continue;
+                    var nob = pc.NetworkObject;
+                    if (nob == null) continue;
+
+                    // FishNet assigns real remote clients connection IDs in [0, 32766]. The headless
+                    // host's phantom player is server-owned (-1) or carries the reserved clientHost id
+                    // (32767). Only hide those — never touch a real client's own player object.
+                    int ownerId = nob.OwnerId;
+                    bool isPhantom = ownerId == 32767 || ownerId < 0;
+                    if (!isPhantom) continue;
+
+                    int nobId = nob.GetInstanceID();
+                    if (_hostOnlyPhantomNobs.Contains(nobId)) continue;
+
+                    if (MakeNetworkObjectHostOnly(nob, serverObjects))
+                    {
+                        _hostOnlyPhantomNobs.Add(nobId);
+                        MelonLogger.Msg($"[HeadlessMode][HIDE] Phantom host PlayerControl (ownerId={ownerId}) is now host-only — " +
+                                        "it will no longer be serialized to remote clients, so vanilla clients can finish loading.");
+                    }
+                }
+                catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode][HIDE] {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
+
+        // Attaches a FishNet HostOnlyCondition to a NetworkObject's NetworkObserver so only the host
+        // (the server-as-client) observes it; remote connections fail the condition (FishNet ANDs all
+        // conditions) and the object is never spawned to them. Rebuilds observers so the change takes
+        // effect immediately (and despawns it from any already-connected remote client).
+        private static bool MakeNetworkObjectHostOnly(
+            Il2CppFishNet.Object.NetworkObject nob,
+            Il2CppFishNet.Managing.Server.ServerObjects serverObjects)
+        {
+            var observer = nob.NetworkObserver;
+            if (observer == null)
+            {
+                // No NetworkObserver on the prefab — the object is observed via the global
+                // ObserverManager. Add our own and tell it to ignore the manager so our condition
+                // is authoritative.
+                observer = nob.gameObject.AddComponent<Il2CppFishNet.Observing.NetworkObserver>();
+                observer.OverrideType = Il2CppFishNet.Observing.NetworkObserver.ConditionOverrideType.IgnoreManager;
+                nob.NetworkObserver = observer;
+                observer.Initialize(nob);
+            }
+
+            // Ensure a conditions list exists.
+            var conds = observer.ObserverConditionsInternal;
+            if (conds == null)
+            {
+                conds = new Il2CppSystem.Collections.Generic.List<Il2CppFishNet.Observing.ObserverCondition>();
+                observer.ObserverConditionsInternal = conds;
+            }
+
+            // Skip if a HostOnlyCondition is already present (idempotent / pre-existing).
+            for (int i = 0; i < conds.Count; i++)
+            {
+                var existing = conds[i];
+                if (existing != null && existing.TryCast<Il2CppFishNet.Component.Observing.HostOnlyCondition>() != null)
+                {
+                    serverObjects.RebuildObservers(nob, false);
+                    return true;
+                }
+            }
+
+            var cond = ScriptableObject
+                .CreateInstance(Il2CppInterop.Runtime.Il2CppType.Of<Il2CppFishNet.Component.Observing.HostOnlyCondition>())
+                .TryCast<Il2CppFishNet.Component.Observing.HostOnlyCondition>();
+            if (cond == null)
+            {
+                MelonLogger.Warning("[HeadlessMode][HIDE] Failed to create HostOnlyCondition instance.");
+                return false;
+            }
+
+            cond.Initialize(nob);
+            conds.Add(cond);
+
+            // Re-evaluate observers now so remote clients drop it (or never receive it).
+            serverObjects.RebuildObservers(nob, false);
+            return true;
         }
 
         // Registers the headless server as the host PlayerReference (connection ID 32767) in
@@ -1737,16 +1966,30 @@ namespace SledHeadless
                     ? SledHeadlessCore.ServerName : "HeadlessServer";
 
                 // Pass null for PlayerControl — a headless server has no physical player body.
-                // Linking a PlayerControl here would attach the server's phantom "Player Networked"
-                // object to connection 32767, causing its nametag to appear overlaid on client 1
-                // (they share the same spawn point). The PlayerReference is metadata only.
                 long platformId = (long)FakeSteamId;
 
-                prm.Server_AddPlayerReference(puid, platformId, HostConnectionId, username,
+                // Register the host reference into the SERVER-SIDE lookup dicts ONLY — never into the
+                // synced sync_PlayerReferences SyncList (which Server_AddPlayerReference would do).
+                // A null-PlayerControl host entry replicated to clients makes the game's CLIENT-side
+                // PlayerReferenceManager.OnPlayerReferenceAdded dereference the null PlayerControl and
+                // throw an NRE during the join spawn batch; that desyncs FishNet's PooledReader and hangs
+                // every client that joins while another player is already present. Confirmed via a
+                // client-side ClientSpawnDiag finalizer: BOTH synced entries throw, because the per-call
+                // loop in OnPlayerReferenceAdded chokes on the null-PC host entry regardless of which
+                // index is being added. The server only needs the dict entries —
+                // OnServerReceivedChatBroadcastFromClient resolves senders from them and the null-safe
+                // GetAllConnectionIdsNearPosition reimpl reads them — so we populate the dicts directly
+                // with a constructed reference and keep the host out of every client's synced list.
+                var hostRef = new Il2Cpp.PlayerReference(puid, platformId, HostConnectionId, username,
                     "" /* voiceId — no Dissonance in headless */, AuthPlatform.Steam, null);
 
-                MelonLogger.Msg($"[HeadlessMode] Registered host PlayerReference:" +
-                    $" connId={HostConnectionId}, puid={puid}, name={username}, platformId={platformId}");
+                var connDict = prm._playerConnectionIdToPlayerReference;
+                if (connDict != null) connDict[HostConnectionId] = hostRef;
+                try { var pidDict = prm._playerPlatformIdToPlayerReference; if (pidDict != null && !string.IsNullOrEmpty(puid)) pidDict[puid] = hostRef; } catch { }
+                try { var puidDict = prm._playerPlatformUserIdToPlayerReference; if (puidDict != null && platformId > 0) puidDict[platformId] = hostRef; } catch { }
+
+                MelonLogger.Msg($"[HeadlessMode] Registered host PlayerReference (dict-only, NOT synced to clients):" +
+                    $" connId={HostConnectionId}, puid={puid}, name={username}, platformId={platformId}.");
             }
             catch (Exception ex)
             {
