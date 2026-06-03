@@ -47,7 +47,7 @@ namespace SledHeadless
         /// </summary>
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
-            MelonLogger.Msg("[HeadlessMode] v72 Applying headless suppression patches...");
+            MelonLogger.Msg("[HeadlessMode] v73 Applying headless suppression patches...");
 
             // Silence Harmony's per-patch "WARNING AccessTools.GetTypesFromAssembly" spam.
             // Every harmony.Patch() call internally scans assemblies; UnityEngine.CoreModule
@@ -1690,8 +1690,15 @@ namespace SledHeadless
             }
         }
 
-        // Player NetworkObjects whose footstep value we have already force-re-sent to clients.
-        private static readonly HashSet<int> _footstepResentNobs = new();
+        // Player NetworkObjects whose footstep value we have already force-re-sent to clients, mapped to
+        // the OwnerId (connection id) we delivered it for. FishNet POOLS NetworkObjects: a rejoining player
+        // can REUSE the same object (same GetInstanceID), but it always arrives with a NEW connection id
+        // (FishNet increments connIds and does not immediately recycle them — verified live: client left as
+        // connId 1, rejoined as connId 3). So keying on (nobId, ownerId) — not nobId alone — makes a rejoin
+        // count as fresh and triggers a new cross-tick re-send, even when leave+rejoin happen inside one
+        // poll interval (the old poll-based IntersectWith prune missed that fast-rejoin window → the
+        // rejoiner's footstep stayed stuck at None and they couldn't pick up snowballs).
+        private static readonly Dictionary<int, int> _footstepResentNobOwner = new();
 
         // The headless server keeps each player's PlayerMovement DISABLED (only the owning client
         // simulates it). A DISABLED NetworkBehaviour's SyncVars are excluded from FishNet's per-observer
@@ -1746,7 +1753,10 @@ namespace SledHeadless
 
                                 int nobId = nob == null ? 0 : nob.GetInstanceID();
                                 spawnedNobIds.Add(nobId);
-                                if (_footstepResentNobs.Contains(nobId)) continue;
+                                // Skip only if we have already delivered for THIS owner session. A pooled
+                                // object reused by a rejoiner carries a new OwnerId, so the recorded value
+                                // won't match and we re-send (treat the rejoin as fresh).
+                                if (_footstepResentNobOwner.TryGetValue(nobId, out var sentOwner) && sentOwner == owner) continue;
                                 var sv = mv.sync_CurrentFootstepCollection;
                                 if (sv == null || sv.Value == Il2Cpp.FootstepCollectionType.None) continue; // wait for a real surface
                                 resendQueue.Add(mv);
@@ -1755,12 +1765,16 @@ namespace SledHeadless
                         }
                     }
 
-                    // Forget players who have LEFT: FishNet pools NetworkObjects, so a rejoining player can
-                    // REUSE the same object (same GetInstanceID). If we kept its id, the re-send would be
-                    // skipped and the rejoiner's footstep would never replicate (until they restart their
-                    // client). Keep only ids still spawned, so a reused-on-rejoin object is treated as fresh
-                    // and re-sent again.
-                    _footstepResentNobs.IntersectWith(spawnedNobIds);
+                    // Drop records for objects that are no longer spawned (returned to the pool). Not
+                    // strictly required for correctness now that we key on OwnerId — a rejoin with a new
+                    // connId re-sends regardless — but it keeps the map from growing unbounded.
+                    if (_footstepResentNobOwner.Count > 0)
+                    {
+                        var dead = new List<int>();
+                        foreach (var kv in _footstepResentNobOwner)
+                            if (!spawnedNobIds.Contains(kv.Key)) dead.Add(kv.Key);
+                        foreach (var id in dead) _footstepResentNobOwner.Remove(id);
+                    }
                 }
                 catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode][MVENABLE] scan error: {ex.GetType().Name}: {ex.Message}"); }
 
@@ -1783,7 +1797,7 @@ namespace SledHeadless
                         // Restore the real value (unless the owner already pushed a new one meanwhile).
                         if (sv.Value == Il2Cpp.FootstepCollectionType.None) sv.Value = cur;
                         var nob = mv.NetworkObject;
-                        if (nob != null) _footstepResentNobs.Add(nob.GetInstanceID());
+                        if (nob != null) _footstepResentNobOwner[nob.GetInstanceID()] = nob.OwnerId;
                         MelonLogger.Msg($"[HeadlessMode][MVENABLE] Cross-tick re-sent footstep={cur} for owner={(nob == null ? -1 : nob.OwnerId)} — clients can now see it (snowball pickup).");
                     }
                     catch { }
