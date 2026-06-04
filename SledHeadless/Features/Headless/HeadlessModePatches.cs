@@ -47,7 +47,7 @@ namespace SledHeadless
         /// </summary>
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
-            MelonLogger.Msg("[HeadlessMode] v73 Applying headless suppression patches...");
+            MelonLogger.Msg("[HeadlessMode] v76 Applying headless suppression patches...");
 
             // Silence Harmony's per-patch "WARNING AccessTools.GetTypesFromAssembly" spam.
             // Every harmony.Patch() call internally scans assemblies; UnityEngine.CoreModule
@@ -1202,6 +1202,117 @@ namespace SledHeadless
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] EnsureLobbyHeartbeat: {ex.Message}"); }
         }
 
+        // ───────────────────────── Lobby keep-alive (headless) ─────────────────────────
+        // The base game keeps a hosted EOS lobby joinable two ways; NEITHER runs on a headless host, so
+        // after ~1 hour the server silently drops out of the EOS lobby search list:
+        //
+        //   (1) EOS Connect auth-token refresh. The ProductUserId Connect token has a ~1h TTL. The base
+        //       game's EOSAuthenticator registers AddNotifyAuthExpiration and re-logs-in (StartConnect(1))
+        //       before it expires — but that path is bypassed on headless (PatchBootables force-passes
+        //       EOSAuthenticator.IsBooted) AND its refresh re-login uses a Steam session ticket, which a
+        //       headless host has no SteamManager for. We logged in with a native DeviceId credential, so
+        //       we refresh the same way: periodically re-run the DeviceId EOS_Connect_Login. DeviceId is
+        //       machine-stable, so the re-login returns the SAME ProductUserId — the lobby and FishyEOS
+        //       transport (both keyed by PUID) are unaffected; only the underlying token is renewed. This
+        //       is the primary ~1h fix.
+        //
+        //   (2) Lobby heartbeat. The base game ticks LobbyManager.UpdateLobbyHeartbeat() every 10s (writes
+        //       LobbyAttributeKey.Heartbeat = UtcNow.Ticks and ModifyLobby) to keep the lobby fresh in
+        //       search. On headless the driving MonoBehaviour never runs and the mod's EnsureLobbyHeartbeat
+        //       worker wraps an EMPTY lobby (wrong Id → LobbyManager.Update nulls it). We call
+        //       UpdateLobbyHeartbeat() directly on a 10s loop, bypassing the broken worker.
+        private static bool _refreshInProgress;
+
+        // Re-runs the native DeviceId EOS_Connect_Login to renew the Connect token (same path as the
+        // initial login, minus CreateDeviceId — the device credential is already registered). Reuses the
+        // existing pinned login callback, device-auth flags, and PUID injection. Mirrors the initial-login
+        // style (inline FreeHGlobal, no try/finally) so it stays a valid iterator.
+        private static IEnumerator RefreshConnectLogin()
+        {
+            if (_refreshInProgress) yield break;
+            _refreshInProgress = true;
+
+            var platform = EOSManager.Instance?.GetEOSPlatformInterface();
+            var connect = platform?.GetConnectInterface();
+            if (connect == null)
+            {
+                MelonLogger.Warning("[HeadlessMode][KeepAlive] RefreshConnectLogin: ConnectInterface null — skipping.");
+                _refreshInProgress = false;
+                yield break;
+            }
+
+            IntPtr handle = connect.InnerHandle;
+            IntPtr loginCbPtr = Marshal.GetFunctionPointerForDelegate(_pinnedLoginCb);
+            IntPtr displayNamePtr = Marshal.StringToHGlobalAnsi("HeadlessServer");
+            _deviceAuthDone = false; _deviceAuthSuccess = false; _rawProductUserId = IntPtr.Zero;
+
+            MelonLogger.Msg("[HeadlessMode][KeepAlive] Refreshing EOS Connect token (DeviceId re-login)...");
+            CallEosDeviceLogin(handle, displayNamePtr, loginCbPtr);
+
+            float t = Time.realtimeSinceStartup;
+            while (!_deviceAuthDone && Time.realtimeSinceStartup - t < 15f)
+                yield return new WaitForSecondsRealtime(0.25f);
+
+            Marshal.FreeHGlobal(displayNamePtr);
+
+            if (_deviceAuthSuccess && _rawProductUserId != IntPtr.Zero)
+            {
+                InjectPuidIntoEosManager(_rawProductUserId);
+                MelonLogger.Msg("[HeadlessMode][KeepAlive] EOS Connect token refreshed OK.");
+            }
+            else
+                MelonLogger.Warning($"[HeadlessMode][KeepAlive] EOS Connect token refresh FAILED (done={_deviceAuthDone}, success={_deviceAuthSuccess}).");
+
+            _refreshInProgress = false;
+        }
+
+        // Renews the EOS Connect token every 40 minutes — comfortably under the ~1h TTL — so the
+        // ProductUserId session never lapses and the lobby stays joinable / in EOS search.
+        private static IEnumerator RefreshConnectTokenLoop()
+        {
+            if (!Application.isBatchMode) yield break;
+            const float intervalSecs = 40f * 60f; // 40 min < ~60 min Connect-token TTL
+            while (!_isQuitting)
+            {
+                float waited = 0f;
+                while (waited < intervalSecs && !_isQuitting)
+                {
+                    yield return new WaitForSecondsRealtime(5f);
+                    waited += 5f;
+                }
+                if (_isQuitting) yield break;
+                yield return RefreshConnectLogin();
+            }
+        }
+
+        // Calls LobbyManager.UpdateLobbyHeartbeat() every 10s (the base game's interval) to refresh the
+        // lobby's Heartbeat attribute via ModifyLobby and keep it fresh in EOS search. Guarded so it never
+        // hits UpdateLobbyHeartbeat's null-lobby throw; bypasses the broken EnsureLobbyHeartbeat worker.
+        private static IEnumerator LobbyHeartbeatLoop()
+        {
+            if (!Application.isBatchMode) yield break;
+            int beats = 0;
+            bool announcedFirst = false;
+            while (!_isQuitting)
+            {
+                yield return new WaitForSecondsRealtime(10f);
+                try
+                {
+                    var lm = LobbyManager.Instance;
+                    if (lm == null) continue;
+                    if (_eosLobbyManager?.GetCurrentLobby() == null) continue; // no live lobby yet/anymore
+                    lm.UpdateLobbyHeartbeat();
+                    beats++;
+                    if (!announcedFirst) { MelonLogger.Msg("[HeadlessMode][KeepAlive] Lobby heartbeat active (10s)."); announcedFirst = true; }
+                    else if (beats % 30 == 0) MelonLogger.Msg($"[HeadlessMode][KeepAlive] Lobby heartbeat tick #{beats}.");
+                }
+                catch (Exception ex)
+                {
+                    MelonLogger.Warning($"[HeadlessMode][KeepAlive] Lobby heartbeat error: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+
         // Creates an empty UnityEvent on a LobbyManager property if it is null.
         // The Il2CppInterop null check (val is Object o && o == null) is required because
         // Il2Cpp wrapped objects can pass a C# null-check but still be a null native pointer.
@@ -1602,6 +1713,13 @@ namespace SledHeadless
             // Sled.LocalSledInstance"). MelonLoader clients survive because Il2CppInterop swallows the
             // callback NRE; vanilla clients have no such net, so only they hang. See HidePhantomHostPlayerLoop.
             MelonCoroutines.Start(HidePhantomHostPlayerLoop());
+
+            // Keep the EOS lobby joinable past the ~1h Connect-token TTL and keep it fresh in EOS search.
+            // The base game does both (auth-expiration re-login + a 10s lobby heartbeat); neither runs on a
+            // headless host, so without these the server drops out of the lobby list after ~an hour.
+            // See RefreshConnectTokenLoop / LobbyHeartbeatLoop.
+            MelonCoroutines.Start(RefreshConnectTokenLoop());
+            MelonCoroutines.Start(LobbyHeartbeatLoop());
         }
 
         // Binds ChatManager.OnServerReceivedChatBroadcastFromClient as a FishNet server broadcast
