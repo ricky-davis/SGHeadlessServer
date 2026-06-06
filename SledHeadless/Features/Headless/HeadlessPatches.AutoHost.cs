@@ -223,8 +223,9 @@ namespace SledHeadless
             MelonLogger.Msg($"[HeadlessMode] Calling LobbyManager.CreateLobby('{lobbyName}', {SledHeadlessCore.ServerCapacity}, region='{region}')...");
             try
             {
+                // 4th arg is proximityChatEnabled; text-chat-only == proximity voice off (default-preserving).
                 LobbyManager.Instance.CreateLobby(lobbyName, SledHeadlessCore.ServerCapacity,
-                    SledHeadlessCore.IsPublicLobby, true, SledHeadlessCore.IsPasswordProtected,
+                    SledHeadlessCore.IsPublicLobby, !SledHeadlessCore.IsTextChatOnly, SledHeadlessCore.IsPasswordProtected,
                     SledHeadlessCore.LobbyPassword, SledHeadlessCore.IsPeacefulMode,
                     "PC", region, false);
             }
