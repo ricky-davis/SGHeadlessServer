@@ -220,6 +220,9 @@ namespace SledHeadless
             string lobbyName = !string.IsNullOrWhiteSpace(SledHeadlessCore.ServerName)
                 ? SledHeadlessCore.ServerName : "Headless Server";
 
+            // Destroy any lobby left behind by a prior crashed session before we create a fresh one.
+            HeadlessGhostSweep.Sweep(null);
+
             MelonLogger.Msg($"[HeadlessMode] Calling LobbyManager.CreateLobby('{lobbyName}', {SledHeadlessCore.ServerCapacity}, region='{region}')...");
             try
             {
@@ -276,6 +279,9 @@ namespace SledHeadless
             MelonLogger.Msg($"[HeadlessMode]   LOBBY ID:       {(string.IsNullOrWhiteSpace(lobbyId) ? "<none>" : lobbyId)}");
             MelonLogger.Msg("[HeadlessMode]   → In-game: Join Private Lobby → enter the JOIN CODE above.");
             MelonLogger.Msg("[HeadlessMode] ════════════════════════════════════════════");
+
+            // Record this lobby so the next startup can sweep it if we don't exit cleanly.
+            HeadlessGhostSweep.RememberLobby(lobbyId);
 
             // Report the live EOS lobby + active transport so we know whether/how a client can join.
             LogHostDiagnostics();

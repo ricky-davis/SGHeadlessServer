@@ -52,7 +52,10 @@ namespace SledHeadless
             MelonPreferences.Save();
 
             if (Application.isBatchMode)
+            {
                 HeadlessPatches.ApplyPatches(HarmonyInstance);
+                HeadlessShutdown.Install();
+            }
             else
                 ClientSpawnDiagnostics.Install(HarmonyInstance);
         }
@@ -69,7 +72,10 @@ namespace SledHeadless
         public override void OnApplicationQuit()
         {
             if (Application.isBatchMode)
+            {
                 MelonLogger.Warning($"[HeadlessMode] Application.Quit() called.\n{new System.Diagnostics.StackTrace(true)}");
+                HeadlessShutdown.OnQuit();   // destroy the EOS lobby before we go (main thread)
+            }
         }
 
         private static bool _muteLogged;
@@ -78,6 +84,7 @@ namespace SledHeadless
         public override void OnUpdate()
         {
             if (!Application.isBatchMode) return;
+            HeadlessShutdown.Tick();   // run a requested shutdown destroy on the main thread
             try
             {
                 if (AudioListener.volume != 0f) AudioListener.volume = 0f;

@@ -629,6 +629,8 @@
 		<Compile Include="Features/Headless/HeadlessPatches.ServerBehaviours.cs" />
 		<Compile Include="Features/Headless/HeadlessPatches.PlayerReferences.cs" />
 		<Compile Include="Features/Headless/HeadlessPatches.Audio.cs" />
+		<Compile Include="Features/Headless/HeadlessShutdown.cs" />
+		<Compile Include="Features/Headless/HeadlessGhostSweep.cs" />
 		<Compile Include="Features/Diagnostics/ClientSpawnDiagnostics.cs" />
 		<Compile Include="$(IntermediateOutputPath)GeneratedMelonInfo.cs" />
 	</ItemGroup>
