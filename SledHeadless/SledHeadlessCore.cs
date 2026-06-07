@@ -36,14 +36,16 @@ namespace SledHeadless
 
             // Server config lives in its own shared category so LobbyKit and SledHeadless read one source of truth.
             // Keys, display names, and descriptions match LobbyKit exactly so both bind to the same entries.
+            // GetOrCreate (not CreateEntry): LobbyKit and SledHeadless share this category, and CreateEntry
+            // throws if the entry already exists, so the second mod to load must reuse the existing entries.
             _serverSettings = MelonPreferences.CreateCategory("ServerSettings", "Server Settings");
-            _serverName = _serverSettings.CreateEntry("ServerName", string.Empty, "Server Name", "Custom default lobby/server name. Leave empty to use '<PlayerName>\'s Lobby'.");
-            _serverCapacity = _serverSettings.CreateEntry("ServerCapacity", 8, "Server Capacity", "Saved default value for the max players slider.");
-            _isPublicLobby = _serverSettings.CreateEntry("IsPublicLobby", true, "Public Lobby", "Saved default for public/private lobby.");
-            _isPasswordProtected = _serverSettings.CreateEntry("IsPasswordProtected", false, "Password Protected", "Saved default for password protection.");
-            _lobbyPassword = _serverSettings.CreateEntry("LobbyPassword", string.Empty, "Lobby Password", "Saved default lobby password.");
-            _isPeacefulMode = _serverSettings.CreateEntry("IsPeacefulMode", false, "Peaceful Mode", "Saved default for peaceful mode.");
-            _isTextChatOnly = _serverSettings.CreateEntry("IsTextChatOnly", false, "Text Chat Only", "Saved default for text-chat-only mode.");
+            _serverName = GetOrCreate(_serverSettings, "ServerName", string.Empty, "Server Name", "Custom default lobby/server name. Leave empty to use '<PlayerName>\'s Lobby'.");
+            _serverCapacity = GetOrCreate(_serverSettings, "ServerCapacity", 8, "Server Capacity", "Saved default value for the max players slider.");
+            _isPublicLobby = GetOrCreate(_serverSettings, "IsPublicLobby", true, "Public Lobby", "Saved default for public/private lobby.");
+            _isPasswordProtected = GetOrCreate(_serverSettings, "IsPasswordProtected", false, "Password Protected", "Saved default for password protection.");
+            _lobbyPassword = GetOrCreate(_serverSettings, "LobbyPassword", string.Empty, "Lobby Password", "Saved default lobby password.");
+            _isPeacefulMode = GetOrCreate(_serverSettings, "IsPeacefulMode", false, "Peaceful Mode", "Saved default for peaceful mode.");
+            _isTextChatOnly = GetOrCreate(_serverSettings, "IsTextChatOnly", false, "Text Chat Only", "Saved default for text-chat-only mode.");
 
             // HeadlessAutoHost is Headless-specific, so it stays in the SledHeadless category.
             _headlessAutoHost = _prefs.CreateEntry("HeadlessAutoHost", true, "Headless Auto Host");
@@ -53,6 +55,15 @@ namespace SledHeadless
                 HeadlessPatches.ApplyPatches(HarmonyInstance);
             else
                 ClientSpawnDiagnostics.Install(HarmonyInstance);
+        }
+
+        // GetEntry if it already exists (e.g. LobbyKit created it on the shared ServerSettings category),
+        // otherwise CreateEntry. MelonLoader's CreateEntry throws on a duplicate identifier.
+        private static MelonPreferences_Entry<T> GetOrCreate<T>(MelonPreferences_Category category, string identifier, T defaultValue, string displayName, string description = null)
+        {
+            return category.HasEntry(identifier)
+                ? category.GetEntry<T>(identifier)
+                : category.CreateEntry(identifier, defaultValue, displayName, description);
         }
 
         public override void OnApplicationQuit()
