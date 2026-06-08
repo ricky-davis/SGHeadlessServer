@@ -628,6 +628,8 @@
 		<Compile Include="Features/Headless/HeadlessPatches.AutoHost.cs" />
 		<Compile Include="Features/Headless/HeadlessPatches.ServerBehaviours.cs" />
 		<Compile Include="Features/Headless/HeadlessPatches.PlayerReferences.cs" />
+		<Compile Include="Features/Headless/HeadlessPatches.HostPlayer.cs" />
+		<Compile Include="Features/Headless/HeadlessPatches.EosIdentity.cs" />
 		<Compile Include="Features/Headless/HeadlessPatches.Audio.cs" />
 		<Compile Include="Features/Headless/HeadlessShutdown.cs" />
 		<Compile Include="Features/Headless/HeadlessGhostSweep.cs" />

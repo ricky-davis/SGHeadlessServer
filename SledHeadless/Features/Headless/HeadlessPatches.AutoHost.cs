@@ -250,6 +250,9 @@ namespace SledHeadless
             {
                 SledHeadlessCore.isHost = true;
                 SledHeadlessCore.WasHosting = true;
+                // A headless dedicated server must not enforce FishNet's aggressive ~30s dev timeout, which
+                // was dropping live clients ~30s after they joined ("timed out"). Disable it now.
+                RelaxRemoteClientTimeout();
                 MelonLogger.Msg("[HeadlessMode] Lobby hosted successfully! Launch your game and join.");
             }
             else
@@ -283,6 +286,9 @@ namespace SledHeadless
             // Record this lobby so the next startup can sweep it if we don't exit cleanly.
             HeadlessGhostSweep.RememberLobby(lobbyId);
 
+            // Give the headless host a clean name in the lobby member list (it can't be hidden — it owns the lobby).
+            ApplyHostDisplayName();
+
             // Report the live EOS lobby + active transport so we know whether/how a client can join.
             LogHostDiagnostics();
 
@@ -296,9 +302,13 @@ namespace SledHeadless
             // In a normal hosted game, PlayerControl.InitializePlayerReferenceAsync() calls
             // Cmd_AddPlayerReference to register the host at connection ID 32767. In headless
             // this never completes (it waits for Steam session ticket / Dissonance voice ID).
-            // Without the host PlayerReference in sync_PlayerReferences, client-side code that
-            // checks for a valid host entry (snowball pickup gate, chat gate, etc.) fails silently.
-            RegisterHostPlayerReference();
+            //
+            // Give the host's real spawned PlayerControl a valid character and sync a PlayerReference
+            // (connId 32767) pointing at it — a REAL (non-null) PlayerControl is required so client-side
+            // nametag/ragdoll iteration anchors correctly (a null-PlayerControl entry desyncs nametags onto
+            // other players' heads). The phantom is NOT hidden (no HidePhantomHostPlayerLoop) so each client
+            // receives the host's player object and resolves the reference to it. See SetupHostPlayerLoop.
+            MelonCoroutines.Start(SetupHostPlayerLoop());
 
             // Register the server-side chat broadcast handler. ChatManager.OnEnable registers its
             // FishNet broadcast handlers at scene-load time, when IsServer is still false (we start
@@ -315,13 +325,11 @@ namespace SledHeadless
             // first CmdSetFootstepCollection — required for the snowball-pickup prompt. See the loop comment.
             MelonCoroutines.Start(EnsurePlayerMovementEnabledLoop());
 
-            // Hide the headless host's phantom "Player Networked" object from remote clients so it is
-            // never serialized into their spawn batch (it is uninitialized — no real avatar — and its
-            // spawn-time callback NREs on the client, desyncing FishNet's PooledReader and aborting the
-            // whole spawn packet → the client's own Sled never spawns → stuck on "Waiting for
-            // Sled.LocalSledInstance"). MelonLoader clients survive because Il2CppInterop swallows the
-            // callback NRE; vanilla clients have no such net, so only they hang. See HidePhantomHostPlayerLoop.
-            MelonCoroutines.Start(HidePhantomHostPlayerLoop());
+            // NOTE: the host phantom is intentionally NOT hidden here (SetupHostPlayerLoop needs clients to
+            // receive the host's real PlayerControl). The old HidePhantomHostPlayerLoop / MakeNetworkObjectHostOnly
+            // path in HeadlessPatches.PlayerReferences.cs remains as a dormant fallback. While the clean-spawn
+            // of the phantom is being finalized, run SledHeadless on the joining client so ClientSpawnDiagnostics
+            // captures the exact spawn NRE (the phantom is owner 32767 in those logs).
 
             // Keep the EOS lobby joinable past the ~1h Connect-token TTL and keep it fresh in EOS search.
             // The base game does both (auth-expiration re-login + a 10s lobby heartbeat); neither runs on a
@@ -329,6 +337,34 @@ namespace SledHeadless
             // See RefreshConnectTokenLoop / LobbyHeartbeatLoop.
             MelonCoroutines.Start(RefreshConnectTokenLoop());
             MelonCoroutines.Start(LobbyHeartbeatLoop());
+        }
+
+        // Override the host's EOS lobby-member DISPLAYNAME so clients (including vanilla) show a clean name
+        // instead of the empty/placeholder default. The host owns the lobby and can't be removed from the
+        // member list; the platform icon stays unresolved because a headless DeviceID login has no platform.
+        private static void ApplyHostDisplayName()
+        {
+            try
+            {
+                if (_eosLobbyManager == null)
+                {
+                    MelonLogger.Warning("[HeadlessMode] No EOSLobbyManager — cannot set host display name.");
+                    return;
+                }
+
+                string name = SledHeadlessCore.FakeClientName;
+                var attr = new LobbyAttribute();
+                attr.Key = "DISPLAYNAME";
+                attr.ValueType = AttributeType.String;
+                attr.AsString = name;
+                attr.Visibility = Il2CppEpic.OnlineServices.Lobby.LobbyAttributeVisibility.Public;
+                _eosLobbyManager.SetMemberAttribute(attr);
+                MelonLogger.Msg($"[HeadlessMode] Host lobby display name set to '{name}'.");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[HeadlessMode] ApplyHostDisplayName: {ex.GetType().Name}: {ex.Message}");
+            }
         }
     }
 }

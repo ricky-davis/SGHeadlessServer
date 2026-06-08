@@ -47,13 +47,19 @@ namespace SledHeadless
         /// </summary>
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
-            MelonLogger.Msg("[HeadlessMode] v77 Applying headless suppression patches...");
+            MelonLogger.Msg("[HeadlessMode] v89 Applying headless suppression patches...");
 
             // Silence Harmony's per-patch "WARNING AccessTools.GetTypesFromAssembly" spam.
             // Every harmony.Patch() call internally scans assemblies; UnityEngine.CoreModule
             // has a broken IdentityAttributes type that always throws ReflectionTypeLoadException,
             // and Harmony logs the full exception. We patch the scanner itself to swallow it silently.
             SuppressHarmonyAssemblyScanWarnings(harmony);
+
+            // Give this headless instance its own EOS identity (per-instance CacheDirectory → own DeviceId/PUID)
+            // so multiple servers can run on one machine without sharing a PUID (shared PUID splits a joiner's
+            // EOS P2P packets across instances → ~60s client timeouts). Registered FIRST so it is in place
+            // before the game's EOS boot step creates the platform.
+            PatchEosPlatformCacheDirectory(harmony);
 
             TryPatch(harmony,
                 typeNames: new[] { "Il2CppRewired.InputManager_Base", "Il2CppRewired.InputManager" },
@@ -135,6 +141,18 @@ namespace SledHeadless
                 methodName: "get_IsPeaceful",
                 prefix: nameof(PlayerControl_IsPeaceful_Prefix),
                 label: "PlayerControl.IsPeaceful → headless peaceful mode preference");
+
+            // PlayerControl.OnPlayerModelUpdate is the OnChange handler for the sync_EquippedCharacterRagdoll
+            // SyncVar. It instantiates/updates the avatar's ragdoll model, which requires the character
+            // models to be loaded. On a headless server no models are loaded, so whenever a client switches
+            // character the server-side handler NREs in PlayerRagdollTypeHandler.GetRagdollAnimator() (the
+            // throw is swallowed by Il2CppInterop, but it's noise and risk). The server renders no visuals,
+            // so there is nothing to update — skip it entirely in headless for every player.
+            TryPatch(harmony,
+                typeNames: new[] { "Il2Cpp.PlayerControl" },
+                methodName: "OnPlayerModelUpdate",
+                prefix: nameof(SkipInHeadless),
+                label: "PlayerControl.OnPlayerModelUpdate → skip in headless (no models to update; avoids GetRagdollAnimator NRE)");
 
             // ── CHAT FIX: server-side connection→player resolution ─────────────────────────────
             // PlayerReferenceManager.TryGetPlayer(connectionId, out) — used by the server to attribute an

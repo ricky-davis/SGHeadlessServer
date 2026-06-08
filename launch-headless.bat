@@ -1,8 +1,8 @@
 @echo off
 setlocal
 
-set GAME_EXE=M:\CodingProjects\Modding\SleddingGame\HeadlessServer\GameData\Sledding Game.exe
-set GAME_DIR=M:\CodingProjects\Modding\SleddingGame\HeadlessServer\GameData
+set "GAME_DIR=%CD%\GameData"
+set "GAME_EXE=%GAME_DIR%\Sledding Game.exe"
 
 powershell.exe -NoProfile -Command ^
   "$psi = New-Object System.Diagnostics.ProcessStartInfo;" ^
