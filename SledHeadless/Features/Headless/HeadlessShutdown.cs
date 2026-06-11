@@ -110,7 +110,25 @@ namespace SledHeadless
             {
                 _complete = true;   // unblock any waiting signal handler
             }
+
+            // The only thing that needed graceful handling — destroying the EOS lobby — is done. Returning here
+            // hands off to Wine/Windows to terminate the process, which drags the full Unity/EOS/Proton teardown
+            // (~30s). Exit NOW instead: a hard TerminateProcess is safe (lobby's already gone) and immediate.
+            ForceExitNow();
         }
+
+        // Hard-terminates the current process immediately. TerminateProcess skips all DLL-detach / Unity / Wine
+        // teardown, so the container/process stops the moment the lobby destroy confirms instead of ~30s later.
+        private static void ForceExitNow()
+        {
+            try { MelonLogger.Msg("[HeadlessMode] Shutdown complete — terminating now."); } catch { }
+            try { TerminateProcess(GetCurrentProcess(), 0); } catch { }
+            try { Process.GetCurrentProcess().Kill(); } catch { }   // fallback if the P/Invoke is unavailable
+            try { Environment.Exit(0); } catch { }                  // last resort
+        }
+
+        [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+        [DllImport("kernel32.dll")] private static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 
         private static EOSLobbyManager ResolveEosLobbyManager(LobbyManager lm)
         {

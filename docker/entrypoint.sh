@@ -108,6 +108,16 @@ graceful_shutdown() {
             *) kill -INT "$p" 2>/dev/null || true ;;
         esac
     done
+    # The lobby destroy completes in a few seconds, but the Proton/Wine/Unity teardown AFTER that drags ~30s,
+    # leaving the container "stopping" long after the graceful work is done. Once the grace window has passed
+    # (ample for the destroy: SledHeadless waits <=4s for the main thread + <=3s pumping EOS), force the whole
+    # tree down so the container stops promptly. Tune with GRACE_KILL_SECS; stop_grace_period is the backstop.
+    GRACE_KILL_SECS=${GRACE_KILL_SECS:-10}
+    ( sleep "$GRACE_KILL_SECS"
+      echo "[entry] graceful window (${GRACE_KILL_SECS}s) elapsed — forcing shutdown to skip slow Proton/Wine teardown."
+      kill -KILL "-$GAME_PGID" 2>/dev/null || true
+      pkill -KILL -f 'Sledding Game.exe' 2>/dev/null || true
+    ) &
 }
 trap graceful_shutdown SIGTERM SIGINT
 
