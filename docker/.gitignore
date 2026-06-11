@@ -1,0 +1,6 @@
+# Local secrets / config
+.env
+
+# Copied-in game files (large, licensed — never commit)
+game/
+GameData/

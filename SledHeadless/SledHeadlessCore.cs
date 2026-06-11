@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using HarmonyLib;
 using MelonLoader;
 using UnityEngine;
@@ -20,8 +21,12 @@ namespace SledHeadless
         private static MelonPreferences_Entry<bool> _isPeacefulMode;
         private static MelonPreferences_Entry<bool> _isTextChatOnly;
         private static MelonPreferences_Entry<bool> _headlessAutoHost;
-        private static MelonPreferences_Entry<string> _fakeClientName;
+        private static MelonPreferences_Entry<List<string>> _fakeClientNames;
+        private static MelonPreferences_Entry<int> _fakeClientNameRotateSeconds;
         private static MelonPreferences_Entry<string> _serverInstanceId;
+
+        // Index into the FakeClientName pool, advanced by the rotation loop.
+        private static int _fakeNameIndex;
 
         public static string ServerName => _serverName?.Value ?? string.Empty;
         public static int ServerCapacity => _serverCapacity?.Value ?? 8;
@@ -52,15 +57,35 @@ namespace SledHeadless
         }
 
         // The headless host owns the EOS lobby, so it can't be hidden from the member list, but this controls
-        // the name it shows as. Falls back to the server name, then "Server", if left blank.
+        // the name it shows as. FakeClientName is the CURRENT name from the pool; with more than one name
+        // configured the rotation loop cycles the index every FakeClientNameRotateSeconds. Falls back to the
+        // server name, then "Server", if the pool is empty or the current entry is blank.
         public static string FakeClientName
         {
             get
             {
-                string n = _fakeClientName?.Value;
-                if (!string.IsNullOrWhiteSpace(n)) return n;
+                var list = _fakeClientNames?.Value;
+                if (list != null && list.Count > 0)
+                {
+                    int idx = ((_fakeNameIndex % list.Count) + list.Count) % list.Count;
+                    string n = list[idx];
+                    if (!string.IsNullOrWhiteSpace(n)) return n;
+                }
                 return !string.IsNullOrWhiteSpace(ServerName) ? ServerName : "Server";
             }
+        }
+
+        // Number of names in the rotation pool (2+ enables rotation).
+        public static int FakeClientNameCount => _fakeClientNames?.Value?.Count ?? 0;
+
+        // Seconds between name rotations; 0 or fewer disables rotation (stays on the first name).
+        public static int FakeClientNameRotateSeconds => _fakeClientNameRotateSeconds?.Value ?? 30;
+
+        // Advances to the next name in the pool (wraps). No-op with fewer than two names.
+        public static void AdvanceFakeClientName()
+        {
+            int count = FakeClientNameCount;
+            if (count > 1) _fakeNameIndex = (_fakeNameIndex + 1) % count;
         }
 
         public override void OnInitializeMelon()
@@ -82,8 +107,10 @@ namespace SledHeadless
 
             // HeadlessAutoHost is Headless-specific, so it stays in the SledHeadless category.
             _headlessAutoHost = _prefs.CreateEntry("HeadlessAutoHost", true, "Headless Auto Host");
-            _fakeClientName = _prefs.CreateEntry("FakeClientName", string.Empty, "Fake Client Name",
-                "Name the headless host shows as in the lobby/player list. The server owns the EOS lobby so it can't be hidden; this sets its display name. Blank = use the server name (or 'Server').");
+            _fakeClientNames = _prefs.CreateEntry("FakeClientName", new List<string>(), "Fake Client Name(s)",
+                "Name(s) the headless host shows as in the lobby/player list. The server owns the EOS lobby so it can't be hidden; this sets its display name. Provide more than one to rotate through them (see FakeClientNameRotateSeconds). Empty list = use the server name (or 'Server').");
+            _fakeClientNameRotateSeconds = _prefs.CreateEntry("FakeClientNameRotateSeconds", 30, "Fake Client Name Rotate Seconds",
+                "Seconds between cycling FakeClientName when more than one name is set. 0 or fewer disables rotation (stays on the first name).");
             _serverInstanceId = _prefs.CreateEntry("ServerInstanceId", string.Empty, "Server Instance Id",
                 "Unique id for this headless instance's EOS identity, so you can run multiple servers on one machine each with its own PUID. Blank = auto-generate + store a GUID in UserData/SledHeadless-instance.id.");
             MelonPreferences.Save();

@@ -98,7 +98,7 @@ namespace SledHeadless
                                 if (mv == null) continue;
                                 var nob = pc.NetworkObject;
                                 int owner = nob == null ? -1 : nob.OwnerId;
-                                if (owner == 32767 || owner < 0) continue; // skip the host phantom
+                                if (owner == 32767 || owner < 0) continue; // skip the host's own / server-owned players
 
                                 if (!mv.enabled)
                                 {

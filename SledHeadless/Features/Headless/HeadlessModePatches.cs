@@ -47,7 +47,7 @@ namespace SledHeadless
         /// </summary>
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
-            MelonLogger.Msg("[HeadlessMode] v89 Applying headless suppression patches...");
+            MelonLogger.Msg("[HeadlessMode] v100 Applying headless suppression patches...");
 
             // Silence Harmony's per-patch "WARNING AccessTools.GetTypesFromAssembly" spam.
             // Every harmony.Patch() call internally scans assemblies; UnityEngine.CoreModule
@@ -60,6 +60,15 @@ namespace SledHeadless
             // EOS P2P packets across instances → ~60s client timeouts). Registered FIRST so it is in place
             // before the game's EOS boot step creates the platform.
             PatchEosPlatformCacheDirectory(harmony);
+
+            // Self-eviction guard: stop PEWS from Clear()ing our OWN hosted lobby when EOS reports the host's
+            // own membership Disconnected/Kicked/Closed (the ~6h "server fell off the list" root cause). The
+            // no-arg Lobby.Clear() covers both PEWS clear paths (OnMemberStatusReceived + OnKickedFromLobby).
+            TryPatch(harmony,
+                typeNames: new[] { "Il2CppPlayEveryWare.EpicOnlineServices.Samples.Lobby" },
+                methodName: "Clear",
+                prefix: nameof(Lobby_Clear_Prefix),
+                label: "Lobby.Clear self-eviction guard");
 
             TryPatch(harmony,
                 typeNames: new[] { "Il2CppRewired.InputManager_Base", "Il2CppRewired.InputManager" },
@@ -153,6 +162,14 @@ namespace SledHeadless
                 methodName: "OnPlayerModelUpdate",
                 prefix: nameof(SkipInHeadless),
                 label: "PlayerControl.OnPlayerModelUpdate → skip in headless (no models to update; avoids GetRagdollAnimator NRE)");
+
+            // Make the parked headless host immune to pushes/knockdowns: skip Server_GetHitBySomething when the
+            // target is the host's own player (conn 32767). Peaceful mode does not gate this in the base game.
+            TryPatch(harmony,
+                typeNames: new[] { "Il2Cpp.PlayerControl" },
+                methodName: "Server_GetHitBySomething",
+                prefix: nameof(PlayerControl_Server_GetHitBySomething_Prefix),
+                label: "PlayerControl.Server_GetHitBySomething → headless host is push-immune");
 
             // ── CHAT FIX: server-side connection→player resolution ─────────────────────────────
             // PlayerReferenceManager.TryGetPlayer(connectionId, out) — used by the server to attribute an
@@ -945,19 +962,12 @@ namespace SledHeadless
             }
             catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] EnableHeadlessChat (saved settings): {ex.Message}"); }
 
-            // Also drive through the official UI codepath that normally fires when the host
-            // clicks "Yes" in the setup dialog — UiReferenceController.YesNo_TextChat/VoiceChat.
-            try
-            {
-                var uiRef = Il2Cpp.UiReferenceController.Instance;
-                if (uiRef != null)
-                {
-                    uiRef.YesNo_TextChat(true);
-                    uiRef.YesNo_VoiceChat(true);
-                    MelonLogger.Msg("[HeadlessMode] Called YesNo_TextChat(true) + YesNo_VoiceChat(true).");
-                }
-            }
-            catch (Exception ex) { MelonLogger.Warning($"[HeadlessMode] EnableHeadlessChat (YesNo): {ex.Message}"); }
+            // We intentionally do NOT call UiReferenceController.YesNo_TextChat/VoiceChat here.
+            // Those are the in-game setup-dialog handlers; they call OpenMenu() internally, which
+            // dereferences menu UI that does not exist on a headless server -> NullReferenceException
+            // (the IL2CPP runtime logs the whole stack even though we catch it). They are redundant:
+            // the PlayerSavedSettings flags set above enable chat, and LobbyKit's ChatManager patches
+            // handle the server-side forwarding. So there's nothing to gain and only log noise to lose.
         }
 
         /// <summary>

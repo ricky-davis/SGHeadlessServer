@@ -1,0 +1,27 @@
+services:
+  sledheadless:
+    build:
+      context: .
+      args:
+        PROTON_VERSION: ${PROTON_VERSION:-GE-Proton9-20}
+    image: sledheadless-proton
+    container_name: sledheadless
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      # Your prepared GameData (game + MelonLoader + Mods), bind-mounted at /game.
+      # Mods / UserData / MelonLoader/Logs live inside it, so they are host-accessible here.
+      - ${GAME_DIR_HOST:-./GameData}:/game
+      # Persisted Proton/Wine prefix — keeps the EOS device identity stable across restarts.
+      - proton-prefix:/compatdata
+    # Give MelonLoader's HeadlessShutdown time to close the EOS lobby gracefully
+    # (a hard kill leaves a ghost lobby — see project memory).
+    stop_grace_period: 45s
+
+volumes:
+  proton-prefix:
