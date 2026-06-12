@@ -47,11 +47,11 @@ jobs:
 
       - name: Restore
         run: |
-          dotnet restore LobbyKit/LobbyKit.csproj -p:RefRoot="$REFROOT_PATH"
+          dotnet restore SledHeadless/SledHeadless.csproj -p:RefRoot="$REFROOT_PATH"
 
       - name: Build
         run: |
-          dotnet build LobbyKit/LobbyKit.csproj -c Release --no-restore -p:DeployMod=false -p:RefRoot="$REFROOT_PATH"
+          dotnet build SledHeadless/SledHeadless.csproj -c Release --no-restore -p:DeployMod=false -p:RefRoot="$REFROOT_PATH"
 
       - name: Install Thunderstore CLI
         run: |
@@ -63,9 +63,9 @@ jobs:
       - name: Resolve package version
         id: version
         run: |
-          VERSION="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' LobbyKit/Directory.Build.props)"
+          VERSION="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' SledHeadless/Directory.Build.props)"
           if [ -z "$VERSION" ]; then
-            echo "Failed to resolve version from LobbyKit/Directory.Build.props" >&2
+            echo "Failed to resolve version from SledHeadless/Directory.Build.props" >&2
             exit 1
           fi
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"

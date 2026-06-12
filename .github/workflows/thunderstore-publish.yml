@@ -53,7 +53,7 @@ jobs:
         run: |
           INPUT_VERSION="${{ inputs.version }}"
           TAG_VERSION="${{ github.event.release.tag_name }}"
-          FILE_VERSION="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' LobbyKit/Directory.Build.props)"
+          FILE_VERSION="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' SledHeadless/Directory.Build.props)"
 
           if [ -n "$INPUT_VERSION" ]; then
             VERSION="$INPUT_VERSION"
@@ -72,11 +72,11 @@ jobs:
 
       - name: Restore
         run: |
-          dotnet restore LobbyKit/LobbyKit.csproj -p:RefRoot="$REFROOT_PATH"
+          dotnet restore SledHeadless/SledHeadless.csproj -p:RefRoot="$REFROOT_PATH"
 
       - name: Build
         run: |
-          dotnet build LobbyKit/LobbyKit.csproj -c Release --no-restore -p:DeployMod=false -p:RefRoot="$REFROOT_PATH"
+          dotnet build SledHeadless/SledHeadless.csproj -c Release --no-restore -p:DeployMod=false -p:RefRoot="$REFROOT_PATH"
 
       - name: Install Thunderstore CLI
         run: |

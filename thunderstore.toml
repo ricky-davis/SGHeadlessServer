@@ -3,10 +3,10 @@ schemaVersion = "0.0.1"
 
 [package]
 namespace = "Spyci"
-name = "LobbyKit"
+name = "SledHeadless"
 versionNumber = "1.0.0"
-description = "Host and lobby quality-of-life tools for Sledding Game: bigger lobbies, saved lobby/search settings, player timers, MOTD, and teleport commands."
-websiteUrl = "https://github.com/ricky-davis/SGLobbyKit"
+description = "Run Sledding Game as a headless dedicated server: auto-hosts a lobby, keeps it alive and listed, and runs without a display (Docker-ready). NOT FOR PLAYERS."
+websiteUrl = "https://github.com/ricky-davis/SGHeadlessServer"
 containsNsfwContent = false
 
 [package.dependencies]
@@ -18,7 +18,7 @@ readme = "./README.md"
 outdir = "./build"
 
 [[build.copy]]
-source = "LobbyKit/bin/Release/net6.0/LobbyKit.dll"
+source = "SledHeadless/bin/Release/net6.0/SledHeadless.dll"
 target = "/"
 
 [[build.copy]]
@@ -30,4 +30,4 @@ repository = "https://thunderstore.io"
 communities = ["sledding-game"]
 
 [publish.categories]
-sledding-game = ["tools", "mods"]
+sledding-game = ["tools", "misc"]
