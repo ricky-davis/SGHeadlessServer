@@ -181,6 +181,16 @@ namespace SledHeadless
                     beats++;
                     if (!announcedFirst) { MelonLogger.Msg("[HeadlessMode][KeepAlive] Lobby heartbeat active (10s, real ModifyLobby)."); announcedFirst = true; }
                     else if (beats % 30 == 0) MelonLogger.Msg($"[HeadlessMode][KeepAlive] Lobby heartbeat tick #{beats}.");
+
+                    // RE-LIST after a suppressed self-eviction: the local lobby object is populated (we kept it),
+                    // but EOS may have delisted it server-side. Once the server is EMPTY, re-host to guarantee a
+                    // fresh, listed lobby — zero disruption (no players to drop). RehostLobby self-guards thrash.
+                    if (_rehostWhenEmptyPending && RemotePlayerCount() == 0)
+                    {
+                        MelonLogger.Msg("[HeadlessMode][KeepAlive] Server emptied after a suppressed self-eviction — re-hosting to re-list cleanly.");
+                        _rehostWhenEmptyPending = false;
+                        MelonCoroutines.Start(RehostLobby());
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -204,6 +214,8 @@ namespace SledHeadless
         // Set true around our OWN intentional teardown (shutdown / re-host sweep) so a graceful Clear proceeds.
         internal static bool _allowLobbyClear;
         private static int _suppressedEvictions;
+        // Set when we suppress a self-eviction; the heartbeat loop re-hosts (re-lists) once the server empties.
+        private static bool _rehostWhenEmptyPending;
         private static float _evictionWindowStart;
         private static int _evictionsInWindow;
         private const int EvictionsBeforeGivingUp = 3;   // this many self-clears in the window => assume genuine close => allow it => re-host
@@ -244,8 +256,20 @@ namespace SledHeadless
                 }
 
                 _suppressedEvictions++;
-                MelonLogger.Warning($"[HeadlessMode][KeepAlive] Suppressed EOS lobby self-eviction (Lobby.Clear, lobby {id}) #{_suppressedEvictions} — host stays in its own lobby. EOS reported the host's OWN membership Disconnected/Kicked/Closed; transport is unaffected.");
-                return false;   // skip Clear() -> CurrentLobby stays populated -> server stays in the list
+                // A suppressed eviction keeps EXISTING players connected (their P2P transport is unaffected), but
+                // EOS may have GENUINELY delisted the lobby server-side — in which case our retained object is a
+                // corpse invisible in search (confirmed live: server fell off the list after a single suppressed
+                // self-eviction, heartbeat ticking a dead lobby). We can't cheaply prove listing, but re-hosting
+                // re-lists it. Defer that until the server is EMPTY so live players are never disrupted; the
+                // heartbeat loop fires it the moment remote player count hits 0. See RemotePlayerCount / loop.
+                _rehostWhenEmptyPending = true;
+                // If OnKickedFromLobby fired in the last 2s this is the LeaveLobbyRequested path; otherwise it's
+                // the member-status path (Disconnected/Kicked/Closed) — the exact status can't be captured (its
+                // callback struct crashes the Il2CppInterop trampoline; see HeadlessPatches.LobbyEvictionDiag).
+                string trigger = (_lastEvictionTrigger != null && Time.realtimeSinceStartup - _lastEvictionTriggerAt < 2f)
+                    ? _lastEvictionTrigger : "member-status path (OnMemberStatusReceived: Disconnected/Kicked/Closed) — no LeaveLobbyRequested";
+                MelonLogger.Warning($"[HeadlessMode][KeepAlive] Suppressed EOS lobby self-eviction (Lobby.Clear, lobby {id}) #{_suppressedEvictions} [cause: {trigger}; remotePlayers={RemotePlayerCount()}] — host stays in its own lobby (existing players unaffected). Will re-host to re-list once the server empties, in case EOS delisted it.");
+                return false;   // skip Clear() -> CurrentLobby stays populated -> existing players keep playing
             }
             catch (Exception ex)
             {
@@ -312,6 +336,20 @@ namespace SledHeadless
                 MelonLogger.Warning("[HeadlessMode][KeepAlive] Re-host did NOT produce a new lobby within 20s — will retry after cooldown.");
 
             _rehostInProgress = false;
+        }
+
+        // Count of connected REMOTE players (excludes the clientHost's own connection 32767). 0 == empty server.
+        private static int RemotePlayerCount()
+        {
+            try
+            {
+                var clients = InstanceFinder.ServerManager?.Clients;
+                if (clients == null) return 0;
+                int total = clients.Count;
+                try { if (clients.ContainsKey(32767)) total--; } catch { }
+                return total < 0 ? 0 : total;
+            }
+            catch { return 0; }
         }
 
         // Boxes a long into an Il2Cpp System.Object for LobbyManager.AddAttribute (value param is object).

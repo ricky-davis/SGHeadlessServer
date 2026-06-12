@@ -47,7 +47,7 @@ namespace SledHeadless
         /// </summary>
         public static void ApplyPatches(HarmonyLib.Harmony harmony)
         {
-            MelonLogger.Msg("[HeadlessMode] v101 Applying headless suppression patches...");
+            MelonLogger.Msg("[HeadlessMode] v104 Applying headless suppression patches...");
 
             // Silence Harmony's per-patch "WARNING AccessTools.GetTypesFromAssembly" spam.
             // Every harmony.Patch() call internally scans assemblies; UnityEngine.CoreModule
@@ -69,6 +69,10 @@ namespace SledHeadless
                 methodName: "Clear",
                 prefix: nameof(Lobby_Clear_Prefix),
                 label: "Lobby.Clear self-eviction guard");
+
+            // Read-only: name WHICH EOS callback (+ member-status code) drives a self-eviction, so we can learn
+            // the root cause from a live log the next time one fires. See HeadlessPatches.LobbyEvictionDiag.cs.
+            ApplyLobbyEvictionDiagnostics(harmony);
 
             TryPatch(harmony,
                 typeNames: new[] { "Il2CppRewired.InputManager_Base", "Il2CppRewired.InputManager" },
